@@ -1,0 +1,443 @@
+\documentclass[12pt,a4paper]{article}
+\usepackage[UTF8]{ctex}
+\usepackage{geometry}
+\usepackage{listings}
+\usepackage{xcolor}
+\usepackage{hyperref}
+\usepackage{amsmath}
+\usepackage{algorithm}
+\usepackage{algpseudocode}
+
+\geometry{margin=2.5cm}
+
+\lstset{
+    language=Python,
+    basicstyle=\ttfamily\small,
+    keywordstyle=\color{blue}\bfseries,
+    commentstyle=\color{green!60!black},
+    stringstyle=\color{red},
+    numbers=left,
+    numberstyle=\tiny\color{gray},
+    stepnumber=1,
+    numbersep=5pt,
+    frame=single,
+    breaklines=true,
+    showstringspaces=false,
+    tabsize=4
+}
+
+\title{Halo 系统代码文档：Parser 模块}
+\author{代码分析文档}
+\date{\today}
+
+\begin{document}
+
+\maketitle
+
+\tableofcontents
+\newpage
+
+\section{概述}
+
+\texttt{parser.py} 模块负责从 YAML 配置文件解析并构建智能体工作流的有向无环图（DAG）。它是整个系统的入口点，将声明式的工作流描述转换为可执行的 \texttt{Operator} 对象图。
+
+\section{模块功能}
+
+\begin{itemize}
+    \item 加载和解析 YAML 配置文件
+    \item 验证配置的完整性和正确性
+    \item 构建 \texttt{Operator} 对象图（DAG）
+    \item 计算每个 OP 到终点的最长距离（用于调度优化）
+    \item 检测图中的循环依赖
+\end{itemize}
+
+\section{YAML 配置格式}
+
+\subsection{基本结构}
+
+\begin{lstlisting}
+start_ops:
+  - op0          # 起始节点列表
+end_ops:
+  - op2          # 终止节点列表
+
+ops:
+  op0:
+    model: meta-llama/Llama-3.1-8B-Instruct
+    prompt: "Please answer the question."
+    max_tokens: 512
+    input_ops: []           # 空列表表示起始节点
+    output_ops:
+      - op1
+    
+  op1:
+    model: meta-llama/Llama-3.1-8B-Instruct
+    prompt: "Please refine the answer."
+    max_tokens: 1024
+    input_ops:
+      - op0      # 依赖 op0 的输出
+    output_ops:
+      - op2
+    
+  op2:
+    model: meta-llama/Llama-3.1-8B-Instruct
+    prompt: "Please provide final answer."
+    max_tokens: 512
+    input_ops:
+      - op1
+    output_ops: []          # 空列表表示终止节点
+\end{lstlisting}
+
+\subsection{字段说明}
+
+\begin{description}
+    \item[\texttt{start_ops}] 必需，非空列表，指定工作流的入口节点
+    \item[\texttt{end_ops}] 必需，非空列表，指定工作流的出口节点
+    \item[\texttt{ops}] 必需，字典，键为 OP ID，值为 OP 配置
+    \item[\texttt{model}] 必需，模型标识符
+    \item[\texttt{prompt}] 可选，系统提示词
+    \item[\texttt{input_ops}] 可选，前驱节点列表，默认为空列表
+    \item[\texttt{output_ops}] 可选，后继节点列表，默认为空列表
+    \item[\texttt{max_tokens}] 可选，最大生成 token 数，默认 256
+    \item[\texttt{temperature}] 可选，采样温度，默认 0.7
+    \item[\texttt{top_p}] 可选，Top-p 采样参数，默认 0.9
+    \item[\texttt{keep_cache}] 可选，是否保留 KV cache，默认自动推断
+\end{description}
+
+\section{核心函数}
+
+\subsection{load\_config}
+
+\begin{lstlisting}
+def load_config(config_path: str) -> dict:
+    """Load YAML config as dict."""
+    with open(config_path, "r") as f:
+        return yaml.safe_load(f)
+\end{lstlisting}
+
+\begin{description}
+    \item[功能] 从文件路径加载 YAML 配置文件并解析为 Python 字典
+    \item[参数] \texttt{config_path}：YAML 文件的路径
+    \item[返回] 解析后的配置字典
+    \item[实现] 使用 \texttt{yaml.safe\_load} 安全地解析 YAML，避免执行任意代码
+\end{description}
+
+\subsection{build\_ops\_from\_config}
+
+\subsubsection{函数签名}
+
+\begin{lstlisting}
+def build_ops_from_config(config: dict) -> Tuple[
+    Dict[str, Operator],  # ops: op_id -> Operator
+    List[Operator],       # start_ops
+    List[Operator],      # end_ops
+    Set[str]             # models: 所有使用的模型名称
+]:
+\end{lstlisting}
+
+\subsubsection{功能概述}
+
+这是 parser 模块的核心函数，负责将配置字典转换为可执行的 \texttt{Operator} 对象图。
+
+\subsubsection{执行流程}
+
+\begin{enumerate}
+    \item \textbf{验证必需字段}
+    \begin{lstlisting}
+    conf_ops = config.get("ops")
+    if not isinstance(conf_ops, dict) or not conf_ops:
+        raise ValueError("Config must contain a non-empty 'ops' mapping.")
+    start_keys = config.get("start_ops")
+    end_keys = config.get("end_ops")
+    if not isinstance(start_keys, list) or not start_keys:
+        raise ValueError("'start_ops' must be a non-empty list of op ids.")
+    if not isinstance(end_keys, list) or not end_keys:
+        raise ValueError("'end_ops' must be a non-empty list of op ids.")
+    \end{lstlisting}
+    
+    \item \textbf{创建 Operator 对象}
+    \begin{lstlisting}
+    ops: Dict[str, Operator] = {oid: Operator(id=oid) for oid in conf_ops.keys()}
+    \end{lstlisting}
+    为每个 OP ID 创建一个空的 \texttt{Operator} 对象。
+    
+    \item \textbf{验证引用和必需字段}
+    \begin{lstlisting}
+    for oid, spec in conf_ops.items():
+        if "model" not in spec:
+            raise ValueError(f"Op '{oid}' is missing required field 'model'.")
+        in_ids = spec.get("input_ops", []) or []
+        out_ids = spec.get("output_ops", []) or []
+        for rid in in_ids + out_ids:
+            if rid not in ops:
+                raise ValueError(f"Op '{oid}' references unknown op '{rid}' in inputs/outputs.")
+    \end{lstlisting}
+    检查：
+    \begin{itemize}
+        \item 每个 OP 必须有 \texttt{model} 字段
+        \item \texttt{input_ops} 和 \texttt{output_ops} 中引用的 OP ID 必须存在
+    \end{itemize}
+    
+    \item \textbf{建立依赖关系并配置模型}
+    \begin{lstlisting}
+    for oid, op in ops.items():
+        spec = conf_ops[oid]
+        input_ids = spec.get("input_ops", []) or []
+        output_ids = spec.get("output_ops", []) or []
+        
+        # 建立双向链接
+        op.input_ops = [ops[k] for k in input_ids]
+        op.output_ops = [ops[k] for k in output_ids]
+        
+        model = spec["model"]
+        models.add(model)
+        
+        # keep_cache 推断逻辑
+        explicit_keep = spec.get("keep_cache", None)
+        inferred_keep = any(conf_ops[oid2]["model"] == model for oid2 in output_ids)
+        op.keep_cache = bool(explicit_keep) if explicit_keep is not None else inferred_keep
+    \end{lstlisting}
+    
+    \textbf{关键逻辑：keep\_cache 推断}
+    \begin{itemize}
+        \item 如果配置中显式指定了 \texttt{keep\_cache}，则使用该值
+        \item 否则，如果该 OP 的任意后继节点使用相同模型，则自动推断为 \texttt{True}
+        \item 这有助于优化：如果下游 OP 使用相同模型，保留 cache 可以避免重复计算前缀
+    \end{itemize}
+    
+    \item \textbf{创建 ModelConfig 对象}
+    \begin{lstlisting}
+    op.model_config = ModelConfig(
+        model_name=model,
+        system_prompt=spec.get("prompt"),
+        temperature=spec.get("temperature", 0.7),
+        top_p=spec.get("top_p", 0.9),
+        max_tokens=spec.get("max_tokens", 256),
+        max_batch_size=spec.get("max_batch_size", torch.inf),
+        dtype=spec.get("dtype", "bfloat16"),
+        quantization=spec.get("quantization", None),
+        lora_config=spec.get("lora_config", None),
+        max_model_len=spec.get("max_model_len", None),
+        min_tokens=spec.get("min_tokens", 0),
+        use_chat_template=spec.get("use_chat_template", True),
+    )
+    \end{lstlisting}
+    
+    \item \textbf{初始化运行时字段}
+    \begin{lstlisting}
+    op.data_parallel = False
+    op.is_duplicate = False
+    op.duplicate_info = None
+    op.main_op = None
+    op.max_distance = -1  # 稍后由 _compute_max_distances 计算
+    \end{lstlisting}
+    
+    \item \textbf{解析 start\_ops 和 end\_ops}
+    \begin{lstlisting}
+    for k in start_keys + end_keys:
+        if k not in ops:
+            raise ValueError(f"Unknown op id '{k}' referenced in start_ops/end_ops.")
+    start_ops = [ops[k] for k in start_keys]
+    end_ops = [ops[k] for k in end_keys]
+    \end{lstlisting}
+    
+    \item \textbf{计算最长距离}
+    \begin{lstlisting}
+    _compute_max_distances(ops, end_ops)
+    \end{lstlisting}
+    为每个 OP 计算到任意终点 OP 的最长路径长度，用于调度优化。
+    
+    \item \textbf{返回结果}
+    \begin{lstlisting}
+    return ops, start_ops, end_ops, models
+    \end{lstlisting}
+\end{enumerate}
+
+\subsection{build\_from\_path}
+
+\begin{lstlisting}
+def build_from_path(config_path: str) -> Tuple[
+    Dict[str, Operator],
+    List[Operator],
+    List[Operator],
+    Set[str]
+]:
+    """Convenience wrapper: load + build in one call."""
+    return build_ops_from_config(load_config(config_path))
+\end{lstlisting}
+
+\begin{description}
+    \item[功能] 便捷函数，一次性完成加载和构建
+    \item[参数] \texttt{config_path}：YAML 文件路径
+    \item[返回] 与 \texttt{build\_ops\_from\_config} 相同
+    \item[用途] 简化调用，避免手动调用两个函数
+\end{description}
+
+\section{最长距离计算}
+
+\subsection{\_compute\_max\_distances}
+
+\subsubsection{功能}
+
+为每个 OP 计算到任意终点 OP 的最长路径长度（边数），同时检测循环依赖。
+
+\subsubsection{算法：DFS + 记忆化}
+
+\begin{algorithm}
+\caption{计算最长距离到终点}
+\begin{algorithmic}[1]
+\Procedure{DFS}{op, end\_set, memo, visiting}
+    \If{op in memo}
+        \State \Return memo[op]
+    \EndIf
+    \If{op in visiting}
+        \State \textbf{raise} "Cycle detected"
+    \EndIf
+    \State visiting.add(op)
+    \If{op in end\_set}
+        \State memo[op] = 0
+        \State visiting.remove(op)
+        \State \Return 0
+    \EndIf
+    \State best = -1
+    \For{child in op.output\_ops}
+        \State d = DFS(child, end\_set, memo, visiting)
+        \If{d != -1}
+            \State best = max(best, d + 1)
+        \EndIf
+    \EndFor
+    \State memo[op] = best
+    \State visiting.remove(op)
+    \State \Return best
+\EndProcedure
+\end{algorithmic}
+\end{algorithm}
+
+\subsubsection{实现细节}
+
+\begin{lstlisting}
+def _compute_max_distances(ops: Dict[str, Operator], end_ops: List[Operator]) -> None:
+    """
+    For each op, compute the longest distance (in edges) to ANY end-op.
+    If an op cannot reach any end-op, its distance is -1.
+    Detect cycles and raise ValueError if found.
+    """
+    end_set = set(end_ops)
+    memo: Dict[Operator, int] = {}
+    visiting: Set[Operator] = set()  # 用于循环检测
+    
+    def dfs(op: Operator) -> int:
+        if op in memo:
+            return memo[op]
+        if op in visiting:
+            raise ValueError("Cycle detected in the op graph.")
+        visiting.add(op)
+        
+        if op in end_set:
+            memo[op] = 0
+            visiting.remove(op)
+            return 0
+        
+        best = -1
+        for child in op.output_ops:
+            d = dfs(child)
+            if d != -1:  # 可达终点
+                best = max(best, d + 1)
+        
+        memo[op] = best
+        visiting.remove(op)
+        return best
+    
+    # 为所有 OP 计算距离
+    for op in ops.values():
+        op.max_distance = dfs(op)
+\end{lstlisting}
+
+\subsubsection{关键点}
+
+\begin{itemize}
+    \item \textbf{记忆化}：避免重复计算，时间复杂度 $O(V + E)$
+    \item \textbf{循环检测}：使用 \texttt{visiting} 集合检测后向边，如果访问到正在访问的节点，说明存在环
+    \item \textbf{不可达处理}：如果 OP 无法到达任何终点，距离为 -1
+    \item \textbf{最长路径}：使用 \texttt{max} 选择所有后继节点中的最长路径
+\end{itemize}
+
+\subsubsection{用途}
+
+\texttt{max\_distance} 字段在调度器中被广泛使用：
+\begin{itemize}
+    \item \textbf{优先级排序}：距离终点越远的 OP 通常应该优先执行（尽早开始长链）
+    \item \textbf{调度决策}：帮助调度器决定哪些 OP 应该先分配到设备
+    \item \textbf{负载均衡}：考虑剩余工作量，更好地平衡各设备的负载
+\end{itemize}
+
+\section{错误处理}
+
+\subsection{可能的错误}
+
+\begin{enumerate}
+    \item \textbf{缺少必需字段}
+    \begin{itemize}
+        \item \texttt{ops} 为空或不存在
+        \item \texttt{start\_ops} 或 \texttt{end\_ops} 为空
+        \item 某个 OP 缺少 \texttt{model} 字段
+    \end{itemize}
+    
+    \item \textbf{引用错误}
+    \begin{itemize}
+        \item \texttt{input\_ops} 或 \texttt{output\_ops} 中引用了不存在的 OP ID
+        \item \texttt{start\_ops} 或 \texttt{end\_ops} 中引用了不存在的 OP ID
+    \end{itemize}
+    
+    \item \textbf{循环依赖}
+    \begin{itemize}
+        \item 图中存在有向环（通过 DFS 检测）
+        \item 抛出 \texttt{ValueError("Cycle detected in the op graph.")}
+    \end{itemize}
+\end{enumerate}
+
+\section{使用示例}
+
+\subsection{基本用法}
+
+\begin{lstlisting}
+from halo.parser import build_from_path
+
+# 从 YAML 文件构建工作流图
+ops, start_ops, end_ops, models = build_from_path("templates/adv_reason_3.yaml")
+
+# 访问特定 OP
+op0 = ops["op0"]
+print(f"OP0 使用模型: {op0.model_config.model_name}")
+print(f"OP0 的前驱: {[op.id for op in op0.input_ops]}")
+print(f"OP0 的后继: {[op.id for op in op0.output_ops]}")
+print(f"OP0 到终点的最长距离: {op0.max_distance}")
+\end{lstlisting}
+
+\subsection{验证图结构}
+
+\begin{lstlisting}
+# 检查所有 OP 是否可达终点
+for op_id, op in ops.items():
+    if op.max_distance == -1:
+        print(f"警告: {op_id} 无法到达任何终点节点")
+    else:
+        print(f"{op_id} 到终点的最长距离: {op.max_distance}")
+\end{lstlisting}
+
+\section{总结}
+
+\texttt{parser.py} 模块是 Halo 系统的配置解析层，主要功能包括：
+
+\begin{itemize}
+    \item \textbf{配置解析}：从 YAML 文件加载工作流定义
+    \item \textbf{图构建}：将配置转换为 \texttt{Operator} 对象的有向无环图
+    \item \textbf{依赖建立}：建立 OP 之间的输入输出依赖关系
+    \item \textbf{自动推断}：自动推断 \texttt{keep\_cache} 等优化参数
+    \item \textbf{距离计算}：计算每个 OP 到终点的最长距离，用于调度优化
+    \item \textbf{错误检测}：检测配置错误和循环依赖
+\end{itemize}
+
+该模块的输出（\texttt{ops}、\texttt{start\_ops}、\texttt{end\_ops}）是后续调度器和优化器的输入，是整个系统的基础。
+
+\end{document}

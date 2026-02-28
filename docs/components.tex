@@ -1,0 +1,332 @@
+\documentclass[12pt,a4paper]{article}
+\usepackage[UTF8]{ctex}
+\usepackage{geometry}
+\usepackage{listings}
+\usepackage{xcolor}
+\usepackage{hyperref}
+\usepackage{amsmath}
+
+\geometry{margin=2.5cm}
+
+% 代码样式
+\lstset{
+    language=Python,
+    basicstyle=\ttfamily\small,
+    keywordstyle=\color{blue}\bfseries,
+    commentstyle=\color{green!60!black},
+    stringstyle=\color{red},
+    numbers=left,
+    numberstyle=\tiny\color{gray},
+    stepnumber=1,
+    numbersep=5pt,
+    frame=single,
+    breaklines=true,
+    showstringspaces=false,
+    tabsize=4
+}
+
+\title{Halo 系统代码文档：Components 模块}
+\author{代码分析文档}
+\date{\today}
+
+\begin{document}
+
+\maketitle
+
+\tableofcontents
+\newpage
+
+\section{概述}
+
+\texttt{components} 模块定义了 Halo 系统的核心数据结构，包括：
+\begin{itemize}
+    \item \texttt{Operator}：表示工作流中的一个操作节点
+    \item \texttt{Query}：表示一个用户查询请求
+    \item \texttt{ModelConfig}：模型配置信息
+    \item \texttt{ExecuteInfo}：执行信息封装
+\end{itemize}
+
+这些组件构成了整个系统的基础数据模型。
+
+\section{Operator 类}
+
+\subsection{类定义位置}
+\texttt{halo/components/operator.py}
+
+\subsection{功能概述}
+\texttt{Operator} 类表示智能体工作流图中的一个节点（OP），每个节点对应一个模型推理任务，包含模型配置、输入输出依赖关系等信息。
+
+\subsection{关键属性}
+
+\begin{lstlisting}
+class Operator:
+    def __init__(self, id=None, prompt=None, model_config=None, keep_cache=False):
+        self.id = id if id is not None else uuid.uuid4()
+        self.input_ops = []              # 前驱节点列表
+        self.output_nodes = []           # 后继节点列表
+        self.prompt = prompt             # 提示词（可选）
+        self.model_config = model_config # 模型配置对象
+        self.max_distance = None         # 到终点的最长距离
+        self.keep_cache = keep_cache     # 是否保留 KV cache
+\end{lstlisting}
+
+\subsection{详细说明}
+
+\subsubsection{\_\_init\_\_ 方法}
+\begin{description}
+    \item[功能] 初始化一个 Operator 对象
+    \item[参数]
+    \begin{itemize}
+        \item \texttt{id}：操作符的唯一标识符，如果为 None 则自动生成 UUID
+        \item \texttt{prompt}：可选的提示词字符串
+        \item \texttt{model_config}：\texttt{ModelConfig} 对象，包含模型相关配置
+        \item \texttt{keep_cache}：布尔值，指示是否保留 KV cache 供下游节点使用
+    \end{itemize}
+    \item[初始化逻辑]
+    \begin{enumerate}
+        \item 生成或使用提供的 ID
+        \item 初始化 \texttt{input_ops} 和 \texttt{output_nodes} 为空列表
+        \item 设置模型配置和提示词
+        \item 初始化运行时字段：\texttt{data_parallel}、\texttt{is_duplicate}、\texttt{duplicate_info}、\texttt{main_node}、\texttt{benchmark}
+    \end{enumerate}
+\end{description}
+
+\subsubsection{运行时字段}
+\begin{itemize}
+    \item \texttt{data_parallel}：标记该 OP 是否采用数据并行（多设备复制执行）
+    \item \texttt{is_duplicate}：标记是否为复制节点（用于数据并行）
+    \item \texttt{duplicate_info}：复制信息 \texttt{[rep\_idx, rep\_total]}，表示在总副本中的索引和总数
+    \item \texttt{main_node}：如果为复制节点，指向原始主节点
+    \item \texttt{benchmark}：性能基准对象，记录 init\_time、prefill\_time、generate\_time
+    \item \texttt{max_distance}：由 parser 计算，表示到任意终点 OP 的最长路径长度
+\end{itemize}
+
+\subsection{Benchmark 类}
+
+\texttt{Operator} 内部包含一个 \texttt{Benchmark} 类，用于记录性能指标：
+
+\begin{lstlisting}
+class Benchmark:
+    def __init__(self):
+        self.init_time = 0      # 初始化时间
+        self.prefill_time = 0   # Prefill 阶段时间
+        self.generate_time = 0  # Generate 阶段时间
+    
+    def total_time(self):
+        return self.init_time + self.prefill_time + self.generate_time
+    
+    def update(self, dict):
+        # 累加更新各项时间指标
+        self.init_time += dict.get('init_time', 0.0)
+        self.prefill_time += dict.get('prefill_time', 0.0)
+        self.generate_time += dict.get('generate_time', 0.0)
+\end{lstlisting}
+
+\section{Query 类}
+
+\subsection{类定义位置}
+\texttt{halo/components/query.py}
+
+\subsection{功能概述}
+\texttt{Query} 类表示一个用户查询请求，包含查询 ID、提示词、执行状态、中间结果等信息。
+
+\subsection{关键属性}
+
+\begin{lstlisting}
+class Query:
+    def __init__(self, id, prompt, priority=0):
+        self.id = id                    # 查询唯一标识
+        self.prompt = prompt            # 用户输入的提示词
+        self.prompt_len = len(prompt)   # 提示词长度
+        self.status = "pending"         # 状态：pending/running/finished
+        self.priority = priority        # 优先级（数值越大优先级越高）
+        
+        # 生成相关
+        self.prefix_len = 0             # 前缀长度（用于 cache）
+        self.input_ids = None           # Tokenized 输入 ID
+        self.generated_tokens = 0        # 已生成 token 数
+        self.decoded_tokens = ""        # 已解码的文本
+        self.new_tokens = 0             # 本轮新生成的 token 数
+        
+        # 工作流执行相关
+        self.op_output = {}              # 字典：op_id -> 该 OP 的输出文本
+        self.step = 0                    # 当前执行步骤
+        self.cache = None                # KV cache（用于 TransformersWorker）
+        
+        # 性能基准
+        self.create_time = time.perf_counter()  # 创建时间戳
+        self.benchmark = {}              # 字典：op_id -> (start_time, end_time)
+\end{lstlisting}
+
+\subsection{详细说明}
+
+\subsubsection{\_\_init\_\_ 方法}
+\begin{description}
+    \item[功能] 创建一个新的查询对象
+    \item[参数]
+    \begin{itemize}
+        \item \texttt{id}：查询的唯一标识符（通常是整数）
+        \item \texttt{prompt}：用户输入的原始提示词字符串
+        \item \texttt{priority}：优先级，默认为 0，数值越大优先级越高
+    \end{itemize}
+    \item[初始化逻辑]
+    \begin{enumerate}
+        \item 设置基本属性（ID、提示词、长度、状态、优先级）
+        \item 初始化生成相关字段（token 计数、解码文本等）
+        \item 初始化工作流执行字段（\texttt{op_output} 字典用于存储每个 OP 的输出）
+        \item 记录创建时间戳用于性能分析
+    \end{enumerate}
+\end{description}
+
+\subsubsection{op_output 字典}
+这是 \texttt{Query} 类的核心字段之一，用于实现工作流中的依赖关系：
+\begin{itemize}
+    \item \textbf{键}：OP 的 ID（字符串）
+    \item \textbf{值}：该 OP 对该查询产生的输出文本
+    \item \textbf{用途}：当执行一个 OP 时，系统会检查其所有父 OP 的输出是否都在 \texttt{op_output} 中，如果存在，则将这些输出拼接到当前 OP 的 prompt 后面，实现多步推理
+\end{itemize}
+
+\subsubsection{工作流执行流程}
+\begin{enumerate}
+    \item 查询创建时，\texttt{op_output} 为空，\texttt{status} 为 "pending"
+    \item 当某个 OP 开始执行该查询时，\texttt{status} 变为 "running"
+    \item OP 执行完成后，结果写入 \texttt{op_output[op.id]}，\texttt{step} 递增
+    \item 当所有终点 OP 执行完成，\texttt{status} 变为 "finished"
+\end{enumerate}
+
+\section{ModelConfig 类}
+
+\subsection{类定义位置}
+\texttt{halo/components/model_config.py}
+
+\subsection{功能概述}
+\texttt{ModelConfig} 类封装了模型推理所需的所有配置参数，包括模型名称、采样参数、批处理参数等。
+
+\subsection{关键属性}
+
+\begin{lstlisting}
+class ModelConfig:
+    def __init__(
+        self, 
+        model_name,              # 模型名称（如 "meta-llama/Llama-3.1-8B-Instruct"）
+        system_prompt=None,       # 系统提示词
+        temperature=0.7,         # 采样温度
+        top_p=0.9,               # Top-p 采样参数
+        max_tokens=256,          # 最大生成 token 数
+        max_batch_size=8,        # 最大批处理大小
+        dtype='bfloat16',        # 数据类型
+        use_chat_template=True,  # 是否使用聊天模板
+        quantization=None,       # 量化配置
+        lora_config=None,        # LoRA 配置
+        max_model_len=None,       # 最大模型长度
+        min_tokens=0,            # 最小生成 token 数
+    ):
+        # 所有参数直接赋值给实例属性
+\end{lstlisting}
+
+\subsection{详细说明}
+
+\subsubsection{模型相关参数}
+\begin{itemize}
+    \item \texttt{model_name}：模型标识符，可以是 HuggingFace 模型 ID 或本地路径
+    \item \texttt{dtype}：模型数据类型，支持 "bfloat16"、"float16"、"float32" 等
+    \item \texttt{quantization}：量化配置（如 AWQ、GPTQ），用于减少显存占用
+    \item \texttt{lora_config}：LoRA 适配器配置，用于模型微调
+    \item \texttt{max_model_len}：模型支持的最大序列长度
+\end{itemize}
+
+\subsubsection{生成参数}
+\begin{itemize}
+    \item \texttt{temperature}：采样温度，控制生成的随机性（0.0 为贪婪解码）
+    \item \texttt{top_p}：Nucleus 采样参数，控制采样范围
+    \item \texttt{max_tokens}：单次生成的最大 token 数
+    \item \texttt{min_tokens}：单次生成的最小 token 数
+\end{itemize}
+
+\subsubsection{批处理参数}
+\begin{itemize}
+    \item \texttt{max_batch_size}：一次推理可以处理的最大查询数量
+    \item 这个参数影响调度器的决策：如果查询数量超过 \texttt{max_batch_size}，可能需要分批处理或数据并行
+\end{itemize}
+
+\subsubsection{提示词相关}
+\begin{itemize}
+    \item \texttt{system_prompt}：系统级提示词，通常用于设置模型角色或行为
+    \item \texttt{use_chat_template}：是否使用 HuggingFace 的聊天模板格式化输入
+    \item 如果 \texttt{use_chat_template=True}，系统会将 \texttt{system_prompt} 和用户 prompt 组合成标准的聊天格式
+\end{itemize}
+
+\section{ExecuteInfo 类}
+
+\subsection{类定义位置}
+\texttt{halo/components/exe_info.py}
+
+\subsection{功能概述}
+\texttt{ExecuteInfo} 类是一个简单的数据容器，用于封装一次执行任务所需的所有信息，便于在进程间传递。
+
+\subsection{类定义}
+
+\begin{lstlisting}
+class ExecuteInfo:
+    def __init__(self, op: Operator, query_ids, prompts):
+        self.op = op                    # 要执行的 Operator
+        self.query_ids = query_ids      # 查询 ID 列表
+        self.prompts = prompts          # 对应的提示词列表
+\end{lstlisting}
+
+\subsection{详细说明}
+
+\subsubsection{用途}
+\texttt{ExecuteInfo} 用于优化器（主进程）向 Worker 进程发送执行任务：
+\begin{enumerate}
+    \item 优化器根据调度计划，为每个 Worker 准备 \texttt{ExecuteInfo} 对象
+    \item 通过进程间队列（\texttt{cmd\_queue}）发送给 Worker
+    \item Worker 接收到后，调用 \texttt{execute(exe_info)} 方法执行推理
+\end{enumerate}
+
+\subsubsection{字段对应关系}
+\begin{itemize}
+    \item \texttt{query_ids} 和 \texttt{prompts} 必须长度相同，一一对应
+    \item \texttt{prompts} 中的每个 prompt 已经包含了父 OP 的输出（由优化器在发送前拼接）
+    \item \texttt{op} 包含完整的模型配置和执行参数
+\end{itemize}
+
+\subsubsection{执行流程}
+\begin{enumerate}
+    \item 优化器从 \texttt{Query} 对象中提取 \texttt{query_ids}
+    \item 根据 OP 的依赖关系，从父 OP 的输出中拼接生成完整的 \texttt{prompts}
+    \item 创建 \texttt{ExecuteInfo(op, query_ids, prompts)}
+    \item 发送到 Worker 的 \texttt{cmd\_queue}
+    \item Worker 执行后返回结果，优化器更新 \texttt{Query.op_output}
+\end{enumerate}
+
+\section{模块间关系}
+
+\subsection{数据流}
+\begin{enumerate}
+    \item \textbf{配置阶段}：YAML 文件 $\rightarrow$ \texttt{ModelConfig} $\rightarrow$ \texttt{Operator}
+    \item \textbf{查询创建}：用户输入 $\rightarrow$ \texttt{Query} 对象
+    \item \textbf{调度阶段}：\texttt{Operator} + \texttt{Query} $\rightarrow$ 调度器 $\rightarrow$ \texttt{ExecuteInfo}
+    \item \textbf{执行阶段}：\texttt{ExecuteInfo} $\rightarrow$ Worker $\rightarrow$ 结果 $\rightarrow$ 更新 \texttt{Query.op_output}
+\end{enumerate}
+
+\subsection{依赖关系}
+\begin{itemize}
+    \item \texttt{Operator} 依赖 \texttt{ModelConfig}：每个 OP 必须有一个模型配置
+    \item \texttt{ExecuteInfo} 依赖 \texttt{Operator}：执行信息必须指定要执行的 OP
+    \item \texttt{Query} 独立存在，但通过 \texttt{op_output} 与 \texttt{Operator} 关联
+\end{itemize}
+
+\section{总结}
+
+\texttt{components} 模块提供了 Halo 系统的核心数据结构：
+\begin{itemize}
+    \item \texttt{Operator} 表示工作流节点，包含模型配置和依赖关系
+    \item \texttt{Query} 表示用户查询，维护执行状态和中间结果
+    \item \texttt{ModelConfig} 封装模型配置参数
+    \item \texttt{ExecuteInfo} 用于进程间通信，封装执行任务信息
+\end{itemize}
+
+这些组件共同构成了整个系统的基础，后续的 parser、scheduler、optimizer 和 worker 都基于这些数据结构工作。
+
+\end{document}

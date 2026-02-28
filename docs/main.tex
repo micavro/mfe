@@ -1,0 +1,392 @@
+\documentclass[12pt,a4paper]{article}
+\usepackage[UTF8]{ctex}
+\usepackage{geometry}
+\usepackage{listings}
+\usepackage{xcolor}
+\usepackage{hyperref}
+\usepackage{graphicx}
+
+\geometry{margin=2.5cm}
+
+\lstset{
+    language=Python,
+    basicstyle=\ttfamily\small,
+    keywordstyle=\color{blue}\bfseries,
+    commentstyle=\color{green!60!black},
+    stringstyle=\color{red},
+    numbers=left,
+    numberstyle=\tiny\color{gray},
+    stepnumber=1,
+    numbersep=5pt,
+    frame=single,
+    breaklines=true,
+    showstringspaces=false,
+    tabsize=4
+}
+
+\title{Halo 系统代码文档：完整技术文档}
+\author{代码分析文档}
+\date{\today}
+
+\begin{document}
+
+\maketitle
+
+\tableofcontents
+\newpage
+
+\section{文档概述}
+
+本文档是 Halo 系统的完整技术文档，详细分析了系统的各个模块，从函数级别到语句级别解释了代码的作用和实现逻辑。
+
+\subsection{文档结构}
+
+本文档由以下子文档组成：
+
+\begin{enumerate}
+    \item \textbf{Components 模块}：核心数据结构（Operator、Query、ModelConfig、ExecuteInfo）
+    \item \textbf{Parser 模块}：YAML 配置解析和 DAG 构建
+    \item \textbf{Schedulers 模块}：多种调度策略的实现
+    \item \textbf{Optimizers 模块}：多进程协调器和执行引擎
+    \item \textbf{Workers 模块}：模型推理执行层
+    \item \textbf{Util 模块}：工具函数
+\end{enumerate}
+
+\subsection{系统架构}
+
+Halo 系统采用分层架构：
+
+\begin{enumerate}
+    \item \textbf{配置层}：YAML 文件定义工作流
+    \item \textbf{解析层}：Parser 将配置转换为 DAG
+    \item \textbf{调度层}：Scheduler 生成执行计划
+    \item \textbf{协调层}：Optimizer 管理多进程执行
+    \item \textbf{执行层}：Worker 执行实际推理
+\end{enumerate}
+
+\section{系统工作流程}
+
+\subsection{整体流程}
+
+\begin{enumerate}
+    \item \textbf{配置加载}
+    \begin{itemize}
+        \item 从 YAML 文件加载工作流定义
+        \item 包含 OP 定义、依赖关系、模型配置等
+    \end{itemize}
+    
+    \item \textbf{图构建}
+    \begin{itemize}
+        \item Parser 解析配置，构建 Operator 对象图
+        \item 验证依赖关系，计算最长距离
+        \item 检测循环依赖
+    \end{itemize}
+    
+    \item \textbf{调度规划}
+    \begin{itemize}
+        \item 根据选定的调度策略，生成执行计划
+        \item 将 OP 分配到多个 GPU 设备
+        \item 考虑依赖关系、模型切换成本、负载均衡等
+    \end{itemize}
+    
+    \item \textbf{执行协调}
+    \begin{itemize}
+        \item Optimizer 创建多个 Worker 进程
+        \item 按计划派发任务到各 Worker
+        \item 检查依赖关系，确保正确执行顺序
+        \item 收集结果并更新 Query 状态
+    \end{itemize}
+    
+    \item \textbf{模型推理}
+    \begin{itemize}
+        \item Worker 接收任务，加载模型（如需要）
+        \item 执行批量推理
+        \item 返回结果给 Optimizer
+    \end{itemize}
+    
+    \item \textbf{结果收集}
+    \begin{itemize}
+        \item Optimizer 收集所有 Worker 的结果
+        \item 更新 Query 的 op\_output 字段
+        \item 计算性能指标
+    \end{itemize}
+\end{enumerate}
+
+\subsection{数据流}
+
+\begin{verbatim}
+YAML 配置
+    ↓
+Parser → Operator 图
+    ↓
+Scheduler → Workflows (执行计划)
+    ↓
+Optimizer → ExecuteInfo (任务封装)
+    ↓
+Worker → 推理结果
+    ↓
+Optimizer → 更新 Query.op_output
+    ↓
+最终结果
+\end{verbatim}
+
+\section{关键设计决策}
+
+\subsection{多进程架构}
+
+\begin{itemize}
+    \item \textbf{原因}：Python GIL 限制，多进程可以真正并行利用多 GPU
+    \item \textbf{实现}：每个 GPU 对应一个独立的 Worker 进程
+    \item \textbf{通信}：使用 \texttt{multiprocessing.Queue} 进行进程间通信
+\end{itemize}
+
+\subsection{依赖关系保证}
+
+\begin{itemize}
+    \item \textbf{问题}：工作流中存在依赖关系，必须保证执行顺序
+    \item \textbf{解决}：
+    \begin{enumerate}
+        \item 调度器按拓扑顺序分配任务
+        \item Optimizer 在执行前检查依赖是否满足
+        \item 不满足依赖的任务会被阻塞，等待父任务完成
+    \end{enumerate}
+\end{itemize}
+
+\subsection{批量处理优化}
+
+\begin{itemize}
+    \item \textbf{策略}：将多个查询打包成 batch，一次推理处理
+    \item \textbf{优势}：提高 GPU 利用率，减少推理延迟
+    \item \textbf{实现}：vLLM 自动管理动态批处理
+\end{itemize}
+
+\subsection{模型切换优化}
+
+\begin{itemize}
+    \item \textbf{问题}：切换模型需要重新加载，成本高
+    \item \textbf{解决}：
+    \begin{enumerate}
+        \item 调度器尽量将相同模型的 OP 分配到同一设备
+        \item Beam-Search 调度器考虑模型切换成本
+        \item Worker 延迟加载模型，只在需要时切换
+    \end{enumerate}
+\end{itemize}
+
+\section{各模块详细文档}
+
+\subsection{Components 模块}
+
+\textbf{文件}：\texttt{halo/components/*.py}
+
+\textbf{主要内容}：
+\begin{itemize}
+    \item \texttt{Operator}：工作流节点，包含模型配置和依赖关系
+    \item \texttt{Query}：用户查询，维护执行状态和中间结果
+    \item \texttt{ModelConfig}：模型配置参数封装
+    \item \texttt{ExecuteInfo}：执行任务信息封装
+\end{itemize}
+
+\textbf{详细文档}：参见 \texttt{components.tex}
+
+\subsection{Parser 模块}
+
+\textbf{文件}：\texttt{halo/parser.py}
+
+\textbf{主要内容}：
+\begin{itemize}
+    \item YAML 配置解析
+    \item Operator 图构建
+    \item 依赖关系建立
+    \item 最长距离计算
+    \item 循环依赖检测
+\end{itemize}
+
+\textbf{详细文档}：参见 \texttt{parser.tex}
+
+\subsection{Schedulers 模块}
+
+\textbf{文件}：\texttt{halo/schedulers/*.py}
+
+\textbf{主要内容}：
+\begin{itemize}
+    \item \texttt{schedule\_rr}：轮询调度
+    \item \texttt{schedule\_by\_levels}：层级调度
+    \item \texttt{schedule\_colocate\_parents}：父节点共置调度
+    \item \texttt{schedule\_dp}：数据并行调度
+    \item \texttt{schedule\_heuristic}：启发式调度
+    \item \texttt{schedule\_search}：Beam-Search 调度
+\end{itemize}
+
+\textbf{详细文档}：参见 \texttt{schedulers.tex}
+
+\subsection{Optimizers 模块}
+
+\textbf{文件}：\texttt{halo/optimizers/halo\_v.py}
+
+\textbf{主要内容}：
+\begin{itemize}
+    \item Worker 进程管理
+    \item 调度器调用
+    \item 任务派发和结果收集
+    \item 依赖关系检查
+    \item 性能监控
+\end{itemize}
+
+\textbf{详细文档}：参见 \texttt{optimizers.tex}
+
+\subsection{Workers 模块}
+
+\textbf{文件}：\texttt{halo/workers/worker\_v.py}
+
+\textbf{主要内容}：
+\begin{itemize}
+    \item 模型加载和管理
+    \item 批量推理执行
+    \item 结果格式化
+    \item 命令循环处理
+\end{itemize}
+
+\textbf{详细文档}：参见 \texttt{workers.tex}
+
+\subsection{Util 模块}
+
+\textbf{文件}：\texttt{halo/util.py}
+
+\textbf{主要内容}：
+\begin{itemize}
+    \item 数据类型转换
+    \item GPU 设备管理
+\end{itemize}
+
+\textbf{详细文档}：参见 \texttt{util.tex}
+
+\section{使用示例}
+
+\subsection{基本使用}
+
+\begin{lstlisting}
+from halo.optimizers import Optimizer
+from halo.components import Query
+
+# 1. 创建优化器（加载配置）
+opt = Optimizer("templates/adv_reason_3.yaml")
+
+# 2. 创建查询
+queries = [
+    Query(0, "What is Machine Learning?"),
+    Query(1, "Explain neural networks."),
+]
+
+# 3. 调度和执行
+opt.schedule(queries, strategy="heuristic")
+queries = opt.execute(return_queries=True)
+
+# 4. 查看结果
+for q in queries:
+    print(f"Query {q.id}:")
+    for op_id, output in q.op_output.items():
+        print(f"  {op_id}: {output[:100]}...")
+
+# 5. 性能分析
+opt.print_latency_percentiles()
+
+# 6. 清理
+opt.exit()
+\end{lstlisting}
+
+\subsection{自定义工作流}
+
+创建 YAML 配置文件：
+
+\begin{lstlisting}
+start_ops:
+  - op0
+end_ops:
+  - op2
+
+ops:
+  op0:
+    model: meta-llama/Llama-3.1-8B-Instruct
+    prompt: "Answer the question."
+    max_tokens: 512
+    input_ops: []
+    output_ops:
+      - op1
+  
+  op1:
+    model: meta-llama/Llama-3.1-8B-Instruct
+    prompt: "Refine the answer."
+    max_tokens: 1024
+    input_ops:
+      - op0
+    output_ops:
+      - op2
+  
+  op2:
+    model: meta-llama/Llama-3.1-8B-Instruct
+    prompt: "Provide final answer."
+    max_tokens: 512
+    input_ops:
+      - op1
+    output_ops: []
+\end{lstlisting}
+
+\section{性能优化建议}
+
+\subsection{调度策略选择}
+
+\begin{itemize}
+    \item \textbf{简单工作流}：使用 \texttt{rr} 或 \texttt{by\_levels}
+    \item \textbf{多模型切换}：使用 \texttt{search} 或 \texttt{heuristic}
+    \item \textbf{大批量查询}：使用 \texttt{dp}（数据并行）
+    \item \textbf{缓存优化}：使用 \texttt{colocate\_parents}
+\end{itemize}
+
+\subsection{配置优化}
+
+\begin{itemize}
+    \item \textbf{批处理大小}：根据 GPU 显存调整 \texttt{max\_batch\_size}
+    \item \textbf{模型量化}：使用量化模型减少显存占用
+    \item \textbf{keep\_cache}：对于相同模型的连续 OP，启用 cache 保留
+\end{itemize}
+
+\section{总结}
+
+Halo 系统是一个完整的智能体工作流执行框架，具有以下特点：
+
+\begin{itemize}
+    \item \textbf{声明式配置}：通过 YAML 文件定义工作流，易于修改和扩展
+    \item \textbf{多设备并行}：支持多 GPU 并行执行，提高吞吐量
+    \item \textbf{智能调度}：多种调度策略，优化执行效率
+    \item \textbf{依赖保证}：自动检查依赖关系，确保正确执行
+    \item \textbf{高性能}：基于 vLLM，支持高效的批量推理
+\end{itemize}
+
+通过模块化的设计和清晰的接口，Halo 系统实现了灵活性和性能的平衡。
+
+\section{附录}
+
+\subsection{相关文档}
+
+\begin{itemize}
+    \item \texttt{components.tex}：Components 模块详细文档
+    \item \texttt{parser.tex}：Parser 模块详细文档
+    \item \texttt{schedulers.tex}：Schedulers 模块详细文档
+    \item \texttt{optimizers.tex}：Optimizers 模块详细文档
+    \item \texttt{workers.tex}：Workers 模块详细文档
+    \item \texttt{util.tex}：Util 模块详细文档
+\end{itemize}
+
+\subsection{代码结构}
+
+\begin{verbatim}
+halo/
+├── components/      # 核心数据结构
+├── optimizers/      # 优化器和协调器
+├── parser.py        # 配置解析
+├── schedulers/      # 调度策略
+├── workers/         # 执行层
+└── util.py          # 工具函数
+\end{verbatim}
+
+\end{document}
