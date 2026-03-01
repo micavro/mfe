@@ -9,19 +9,15 @@ MFE Optimizer（mfe_v）：多工作流、单请求到达即执行
 import os
 import queue
 import time
-import warnings
-
-warnings.filterwarnings("ignore", category=FutureWarning, message=".*pynvml.*")
 import torch
 import torch.multiprocessing as mp
 from logging import getLogger
 from typing import Dict, List, Tuple, Any
-
-from halo.workers import vLLMWorker, TestWorker
-from halo.parser import load_config, build_ops_from_config
-from halo.schedulers import schedule_rr
-from halo.components import Operator, ExecuteInfo, Query
-from halo.util import _visible_physical_gpu_ids
+from mfe.workers import vLLMWorker, TestWorker
+from mfe.parser import load_config, build_ops_from_config
+from mfe.schedulers import schedule_rr
+from mfe.components import Operator, ExecuteInfo, Query
+from mfe.util import _visible_physical_gpu_ids
 
 logger = getLogger(__name__)
 logger.setLevel("INFO")
@@ -34,7 +30,7 @@ def _worker_process(worker_id: int, physical_gpu_id: int, cmd_queue: mp.Queue, r
     worker.run()
 
 
-class OptimizerMFE:
+class Optimizer:
     """
     多工作流优化器：每请求可带不同 template（YAML），单请求到达即执行整 DAG。
 
