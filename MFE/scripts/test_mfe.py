@@ -1,22 +1,12 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""
-MFE 测试脚本：按计划向 Server 发送请求，收集结果并统计
-
-- 数据集由命令行指定（--dataset/--name/--column），从 HuggingFace 下载后保存为 JSONL 到 --data-dir，后续优先从 JSONL 读取。
-- 请求为 [prompt, template]，template 为工作流 YAML 文件名。
-- 主进程创建 request_queue / response_queue，启动 MFE Server 子进程，顺序发送请求并收取响应。
-- 统计：成功数、失败数、总答案时间 P50/P95、可选每节点耗时。
-"""
+"""MFE 单请求测试：从 HF/JSONL 取数据，顺序发请求，统计成功数、总答案时间 P50/P95。"""
 
 from __future__ import annotations
 
 import os
 import warnings
-
-# 避免多份 OpenMP 运行时冲突（常见于 Windows 下 PyTorch/NumPy 等混用）
 os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
-# 抑制 torch.cuda 对 pynvml 的弃用提示，避免刷屏
 warnings.filterwarnings("ignore", category=FutureWarning, message=".*pynvml.*")
 
 import json
@@ -37,31 +27,16 @@ from halo.serve.mfe_server import run_mfe_server
 from mfe.config import is_verbose, set_verbose
 
 
-# ---------------------------------------------------------------------------
-# 数据集路径与 JSONL 读写
-# ---------------------------------------------------------------------------
-
 def _dataset_jsonl_basename(dataset: str, name: str, column: str) -> str:
-    """生成数据集对应的 JSONL 文件名（不含路径）。"""
     safe = re.sub(r"[^\w\-]", "_", f"{dataset}_{name}_{column}")
     return f"{safe}.jsonl"
 
 
 def get_dataset_jsonl_path(data_dir: str, dataset: str, name: str, column: str) -> str:
-    """返回数据集对应的 JSONL 文件完整路径。"""
     return os.path.join(data_dir, _dataset_jsonl_basename(dataset, name, column))
 
 
-def load_dataset_from_hf(
-    dataset: str,
-    name: str | None,
-    column: str,
-    split: str = "train",
-) -> List[Dict[str, Any]]:
-    """
-    从 HuggingFace 加载数据集，返回行字典列表。
-    name 为空时使用默认 config。
-    """
+def load_dataset_from_hf(dataset: str, name: str | None, column: str, split: str = "train") -> List[Dict[str, Any]]:
     ds = load_dataset(dataset, name=name, split=split)
     out = []
     for i in range(len(ds)):
@@ -74,7 +49,6 @@ def load_dataset_from_hf(
 
 
 def save_dataset_jsonl(samples: List[Dict[str, Any]], path: str) -> None:
-    """将样本列表保存为 JSONL，每行一个 JSON 对象。"""
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
     with open(path, "w", encoding="utf-8") as f:
         for row in samples:
@@ -82,7 +56,6 @@ def save_dataset_jsonl(samples: List[Dict[str, Any]], path: str) -> None:
 
 
 def load_dataset_jsonl(path: str) -> List[Dict[str, Any]]:
-    """从 JSONL 文件加载样本列表。"""
     out = []
     with open(path, "r", encoding="utf-8") as f:
         for line in f:
@@ -93,18 +66,7 @@ def load_dataset_jsonl(path: str) -> List[Dict[str, Any]]:
     return out
 
 
-def ensure_dataset(
-    data_dir: str,
-    dataset: str,
-    name: str | None,
-    column: str,
-    num_requests: int,
-    split: str = "train",
-) -> List[Dict[str, Any]]:
-    """
-    获取用于测试的样本列表：若 data_dir 下已有对应 JSONL 则从中读取（取前 num_requests 条）；
-    否则从 HuggingFace 下载，保存为 JSONL，再返回前 num_requests 条。
-    """
+def ensure_dataset(data_dir: str, dataset: str, name: str | None, column: str, num_requests: int, split: str = "train") -> List[Dict[str, Any]]:
     path = get_dataset_jsonl_path(data_dir, dataset, name or "default", column)
     if os.path.isfile(path):
         samples = load_dataset_jsonl(path)
@@ -116,33 +78,22 @@ def ensure_dataset(
             ds = concatenate_datasets([ds] * times)
             samples = [ds[i] for i in range(min(num_requests, len(ds)))]
         save_dataset_jsonl(samples, path)
-    # num_requests<=0 表示使用全部样本；否则取前 num_requests 条
     if num_requests is None or num_requests <= 0:
         return samples
     return samples[:num_requests]
 
 
-def build_mfe_requests(
-    samples: List[Dict[str, Any]],
-    text_key: str,
-    template_name: str,
-    max_input_len: int,
-) -> List[Dict[str, Any]]:
-    """
-    构建 MFE 请求列表：{"id", "prompt", "template"}。
-    若某行带有 "template" 字段，则用该值作为该询问的 YAML；否则用默认 template_name（来自 --template）。
-    """
+def build_mfe_requests(samples: List[Dict[str, Any]], text_key: str, template_name: str, max_input_len: int) -> List[Dict[str, Any]]:
     requests = []
     for i, row in enumerate(samples):
         raw = row.get(text_key, "")
         text = raw if isinstance(raw, str) else str(raw)
         if max_input_len and max_input_len > 0:
             text = text[:max_input_len]
-        # 每行可指定不同工作流：row["template"] 存在则用，否则用默认（均为 YAML 文件名）
         tpl = (row.get("template") or template_name).strip() or template_name
         if tpl and not tpl.endswith(".yaml"):
             tpl = tpl + ".yaml"
-        tpl = os.path.basename(tpl)  # 只传文件名，不含路径
+        tpl = os.path.basename(tpl)
         requests.append({
             "id": str(uuid.uuid4()),
             "prompt": text,
@@ -269,7 +220,6 @@ def main() -> None:
             if is_verbose():
                 rid = str(resp.get("id", ""))[:8]
                 total = resp["result"].get("total_answer_time")
-                # 按节点开始时间排序，得到询问经过的链路
                 path_parts = []
                 for op_id, (start, end) in sorted(bench.items(), key=lambda x: x[1][0]):
                     path_parts.append(f"{op_id}({start:.3f}-{end:.3f})")

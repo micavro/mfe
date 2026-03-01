@@ -1,10 +1,4 @@
-"""
-MFE Server：双 Queue 单请求执行服务
-
-主进程创建 request_queue / response_queue 后，在子进程或本进程中调用 run_mfe_server；
-循环从 request_queue 取请求 (id, prompt, template)，用 OptimizerMFE.execute_one 执行整 DAG，
-将结果与性能统计写入 response_queue。收到 None 或 {"command": "exit"} 时退出并关闭 Optimizer。
-"""
+"""双 Queue 单请求服务：取 (id, prompt, template)，execute_one 整 DAG，写 response。"""
 
 from __future__ import annotations
 
@@ -19,51 +13,31 @@ logger = logging.getLogger(__name__)
 
 
 def _build_response_ok(req_id: str, query: Query) -> Dict[str, Any]:
-    """根据执行后的 Query 构造成功响应：op_output、benchmark（各节点 [start,end]）、total_answer_time（秒）。"""
-    benchmark_dict = {}
-    for op_id, t in query.benchmark.items():
-        benchmark_dict[op_id] = [float(t[0]), float(t[1])]
+    benchmark_dict = {op_id: [float(t[0]), float(t[1])] for op_id, t in query.benchmark.items()}
     end_times = [t[1] for t in query.benchmark.values()]
     total_answer_time = (max(end_times) - query.create_time) if end_times else 0.0
     return {
-        "id": req_id,
-        "ok": True,
-        "result": {
-            "op_output": dict(query.op_output),
-            "benchmark": benchmark_dict,
-            "total_answer_time": total_answer_time,
-        },
+        "id": req_id, "ok": True,
+        "result": {"op_output": dict(query.op_output), "benchmark": benchmark_dict, "total_answer_time": total_answer_time},
         "error": None,
     }
 
 
 def _build_response_error(req_id: str, message: str) -> Dict[str, Any]:
-    """构造失败响应。"""
     return {"id": req_id, "ok": False, "result": None, "error": str(message)}
 
 
 def run_mfe_server(
-    request_queue,
-    response_queue,
+    request_queue, response_queue,
     templates_dir: str = "templates",
     use_test_worker: bool | None = None,
 ) -> None:
-    """
-    在当前进程内运行 MFE 服务循环。
-
-    请求格式: {"id": str, "prompt": str, "template": str}（template 为 YAML 文件名或路径）
-    响应格式: {"id": str, "ok": bool, "result": {op_output, benchmark, total_answer_time} | None, "error": str | None}
-    收到 None 或 {"command": "exit"} 时退出并调用 opt.exit()。
-    use_test_worker: 若为 True，使用 TestWorker（不依赖 vLLM/GPU）；默认从环境变量 MFE_USE_TEST_WORKER 读取。
-    verbose: 若为 True，打印每条请求/执行完成的中间信息。
-    """
+    """循环取请求执行 DAG，写响应。请求 {"id","prompt","template"}；收到 None/exit 退出。"""
     opt = OptimizerMFE(templates_dir=templates_dir, use_test_worker=use_test_worker)
     try:
         while True:
             req = request_queue.get()
-            if req is None:
-                break
-            if isinstance(req, dict) and req.get("command") == "exit":
+            if req is None or (isinstance(req, dict) and req.get("command") == "exit"):
                 break
             if not isinstance(req, dict):
                 response_queue.put(_build_response_error("", "invalid request: not a dict"))

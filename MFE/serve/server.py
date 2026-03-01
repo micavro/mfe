@@ -1,6 +1,4 @@
-"""
-多请求异步 Server：submit/status API，共享 GPU 池
-"""
+"""多请求异步 Server：submit/status，共享 GPU 池。"""
 
 from __future__ import annotations
 
@@ -19,15 +17,8 @@ def run_server(
     templates_dir: str = "templates",
     use_test_worker: bool | None = None,
 ) -> None:
-    """
-    在子进程中运行多请求 Server。
-    请求格式: {"req_id": str, "command": "submit"|"status"|"exit", ...}
-    响应格式: {"req_id": str, "result": ...}
-    """
-    opt = MultiRequestOptimizer(
-        templates_dir=templates_dir,
-        use_test_worker=use_test_worker,
-    )
+    """子进程内循环：取请求 submit/status/exit，写响应。"""
+    opt = MultiRequestOptimizer(templates_dir=templates_dir, use_test_worker=use_test_worker)
     try:
         while True:
             try:
@@ -41,10 +32,8 @@ def run_server(
             if not isinstance(req, dict):
                 response_queue.put({"req_id": "", "result": None, "error": "invalid request"})
                 continue
-
             req_id = req.get("req_id", "")
             cmd = req.get("command", "")
-
             if cmd == "submit":
                 dag = req.get("dag", "")
                 input_text = req.get("input", "")

@@ -1,10 +1,4 @@
-"""
-MFE Optimizer（mfe_v）：多工作流、单请求到达即执行
-
-- 不绑定单一 YAML：按请求的 template 按需加载并缓存 DAG。
-- 仅 vLLM Worker + schedule_rr：轮询将 DAG 中各 OP 分配到多 GPU。
-- execute_one(query)：用 query.template 对应 DAG 执行该请求，返回带 op_output、benchmark 的 Query。
-"""
+"""单请求优化器：按 template 按需加载 DAG，schedule_rr 派发到多 GPU，execute_one 执行整 DAG。"""
 
 import os
 import queue
@@ -25,20 +19,10 @@ logger.setLevel("INFO")
 
 
 def _worker_process(worker_id: int, physical_gpu_id: int, cmd_queue: mp.Queue, result_queue: mp.Queue, use_test_worker: bool = False) -> None:
-    """Worker 进程入口：创建 vLLMWorker 或 TestWorker 并运行命令循环。"""
-    worker_cls = TestWorker if use_test_worker else vLLMWorker
-    worker = worker_cls(worker_id, physical_gpu_id, cmd_queue, result_queue)
-    worker.run()
+    (TestWorker if use_test_worker else vLLMWorker)(worker_id, physical_gpu_id, cmd_queue, result_queue).run()
 
 
 class Optimizer:
-    """
-    多工作流优化器：每请求可带不同 template（YAML），单请求到达即执行整 DAG。
-
-    __init__(templates_dir)：仅创建 Worker 进程与队列，不加载 DAG。
-    _get_dag(template)：解析路径，按需 load_config + build_ops_from_config 并缓存。
-    execute_one(query)：取 query.template 的 DAG → schedule_rr → 派发并收集结果，返回执行后的 Query。
-    """
 
     def __init__(self, templates_dir: str = "templates", use_test_worker: bool | None = None, **kwargs) -> None:
         self.templates_dir = os.path.abspath(templates_dir)
@@ -49,14 +33,13 @@ class Optimizer:
         except RuntimeError:
             pass
 
-        # 是否使用测试用假 Worker（不依赖 vLLM/GPU，输出=输入）
         if use_test_worker is None:
             use_test_worker = os.environ.get("MFE_USE_TEST_WORKER", "").lower() in ("1", "true", "yes")
         self._use_test_worker = use_test_worker
 
         self.device_cnt = torch.cuda.device_count()
         if self._use_test_worker and self.device_cnt == 0:
-            self.device_cnt = 1  # 无 GPU 时至少 1 个 Worker 进程以便跑通流程
+            self.device_cnt = 1
         self.processes: List[mp.Process] = []
         self.cmd_queues: List[mp.Queue] = []
         self.result_queues: List[mp.Queue] = []
@@ -79,7 +62,6 @@ class Optimizer:
             self.processes.append(proc)
             proc.start()
 
-        # 占位；execute_one 前由 _get_dag 填充
         self.ops: Dict[str, Operator] = {}
         self.start_ops: List[Operator] = []
         self.end_ops: List[Operator] = []
@@ -94,7 +76,6 @@ class Optimizer:
         )
 
     def _resolve_template_path(self, template: str) -> str:
-        """将 template（文件名或路径）解析为绝对路径，不存在则抛 FileNotFoundError。"""
         template = (template or "").strip()
         if not template:
             raise ValueError("template is empty")
@@ -107,7 +88,6 @@ class Optimizer:
         return path
 
     def _get_dag(self, template: str) -> Tuple[Dict[str, Operator], List[Operator], List[Operator], Any]:
-        """按 template 加载并缓存 DAG，返回 (ops, start_ops, end_ops, models)。"""
         path = self._resolve_template_path(template)
         if path in self._template_cache:
             return self._template_cache[path]
@@ -117,11 +97,9 @@ class Optimizer:
         return ops, start_ops, end_ops, models
 
     def _optimize_queries(self, queries: List[Query]) -> None:
-        """按优先级降序、prompt_len 升序排序。"""
         self.queries = sorted(queries, key=lambda x: (-x.priority, x.prompt_len))
 
     def schedule(self, queries: List[Query], strategy: str = "rr") -> None:
-        """仅支持 "rr"：调用 schedule_rr 生成 self.workflows。"""
         self._optimize_queries(queries)
         self.req_id_map = {q.id: q for q in self.queries}
         if strategy != "rr":
@@ -129,10 +107,6 @@ class Optimizer:
         self.workflows = schedule_rr(self.device_cnt, list(self.ops.values()), self.queries)
 
     def execute_one(self, query: Query) -> Query:
-        """
-        用 query.template 对应的 DAG 执行该请求：_get_dag → schedule_rr → 派发任务、收集结果，更新 query.op_output / benchmark，返回该 Query。
-        单请求执行期间不向 Worker 发 exit，Worker 常驻以供下一请求使用。
-        """
         self.ops, self.start_ops, self.end_ops, self.models = self._get_dag(query.template)
         self.queries = [query]
         self.req_id_map = {query.id: query}
@@ -145,7 +119,6 @@ class Optimizer:
         worker_pointer = [0] * self.device_cnt
 
         def _cmd_transfer(task: Dict) -> Dict:
-            """将 (op, query_ids) 转为 ExecuteInfo：从 req_id_map 取 prompt + 父 OP 输出拼接。"""
             if task.get("command") != "execute":
                 return task
             op, query_ids = task["params"][0], task["params"][1]
@@ -164,7 +137,6 @@ class Optimizer:
             return task
 
         def _task_ready(task: Dict) -> bool:
-            """execute 任务：检查所有 query 的父 OP 输出是否已就绪。"""
             if task.get("command") != "execute":
                 return True
             op, query_ids = task["params"][0], task["params"][1]
@@ -179,7 +151,6 @@ class Optimizer:
             return True
 
         def _try_send(i: int) -> None:
-            """若 Worker i 空闲且下一任务依赖已满足，则派发该任务。"""
             if finish_flags[i] or inflight[i]:
                 return
             if worker_pointer[i] >= len(self.workflows[i]):
@@ -229,7 +200,7 @@ class Optimizer:
                             self.ops[op_name].benchmark.update(result["benchmark"])
                 elif cmd == "error":
                     logger.error("Worker %d error: %s", i, message.get("result"))
-                    finish_flags[i] = True  # 避免因依赖未就绪而永远不发送后续任务导致死循环
+                    finish_flags[i] = True
                 worker_pointer[i] += 1
                 _try_send(i)
                 for j in range(self.device_cnt):
@@ -243,7 +214,6 @@ class Optimizer:
         return self.queries[0]
 
     def exit(self) -> None:
-        """向各 Worker 发 exit，关闭队列并 join 进程。"""
         for i in range(self.device_cnt):
             self.cmd_queues[i].put(("exit", ()))
         for q in self.cmd_queues + self.result_queues:

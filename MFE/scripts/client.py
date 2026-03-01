@@ -1,8 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""
-多请求 Client：submit、status、send_test
-"""
+"""多请求 Client：submit/status/send_test，通过 Queue 与 Server 通信。"""
 
 from __future__ import annotations
 
@@ -23,8 +21,6 @@ from mfe.config import is_verbose, set_verbose
 
 
 class Client:
-    """通过 Queue 与 Server 进程通信的客户端。"""
-
     def __init__(
         self,
         request_queue: mp.Queue,
@@ -52,7 +48,6 @@ class Client:
                     self._pending[req_id]["event"].set()
 
     def submit(self, dag: str, input_text: str) -> str:
-        """提交请求，返回 uid。"""
         req_id = str(uuid.uuid4())
         if is_verbose():
             prompt_preview = (input_text or "")[:50] + ("..." if len(input_text or "") > 50 else "")
@@ -69,7 +64,6 @@ class Client:
         raise RuntimeError(r.get("error", "submit failed") if r else "timeout")
 
     def status(self, uid: str) -> Optional[Dict[str, Any]]:
-        """查询 uid 状态。"""
         req_id = str(uuid.uuid4())
         ev = threading.Event()
         with self._lock:
@@ -86,17 +80,7 @@ class Client:
         self._req_q.put({"command": "exit"})
 
 
-def send_test(
-    client: Client,
-    templates_dir: str,
-    num_requests: int = 5,
-    send_interval: float = 0.5,
-    templates: Optional[List[str]] = None,
-) -> List[str]:
-    """
-    按固定间隔发送请求，可轮换使用多个 YAML 策略。
-    返回 uid 列表。
-    """
+def send_test(client: Client, templates_dir: str, num_requests: int = 5, send_interval: float = 0.5, templates: Optional[List[str]] = None) -> List[str]:
     if templates is None or len(templates) == 0:
         templates = ["adv_reason_3.yaml"]
     tpls = [t if t.endswith(".yaml") else f"{t}.yaml" for t in templates]

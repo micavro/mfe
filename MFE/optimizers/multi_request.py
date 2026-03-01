@@ -1,10 +1,4 @@
-"""
-MultiRequestOptimizer: 多请求异步 + 共享 GPU 池
-
-- 维护 requests: Dict[uid, Query]，每个请求独立 DAG
-- 空闲 GPU + ready 任务 → 立即派发，不阻塞
-- 复用 Parser、Worker、ExecuteInfo
-"""
+"""多请求异步优化器：共享 GPU 池，有空闲 GPU 且存在 ready 任务即派发。"""
 
 from __future__ import annotations
 
@@ -28,22 +22,11 @@ logger = getLogger(__name__)
 logger.setLevel("INFO")
 
 
-def _worker_process(
-    worker_id: int,
-    physical_gpu_id: int,
-    cmd_queue: mp.Queue,
-    result_queue: mp.Queue,
-    use_test_worker: bool = False,
-) -> None:
-    worker_cls = TestWorker if use_test_worker else vLLMWorker
-    worker = worker_cls(worker_id, physical_gpu_id, cmd_queue, result_queue)
-    worker.run()
+def _worker_process(worker_id: int, physical_gpu_id: int, cmd_queue: mp.Queue, result_queue: mp.Queue, use_test_worker: bool = False) -> None:
+    (TestWorker if use_test_worker else vLLMWorker)(worker_id, physical_gpu_id, cmd_queue, result_queue).run()
 
 
 class MultiRequestOptimizer:
-    """
-    多请求异步优化器：共享 GPU 池，有空闲 GPU + ready 任务即派发。
-    """
 
     def __init__(
         self,
@@ -121,7 +104,6 @@ class MultiRequestOptimizer:
         return ops, start_ops, end_ops
 
     def submit(self, dag: str, input_text: str) -> str:
-        """提交请求，返回 uid。"""
         uid = str(uuid.uuid4())
         tpl = dag if dag.endswith(".yaml") else f"{dag}.yaml"
         q = Query(id=uid, prompt=input_text or "", template=tpl)
@@ -130,7 +112,6 @@ class MultiRequestOptimizer:
         return uid
 
     def status(self, uid: str) -> Optional[Dict[str, Any]]:
-        """查询 uid 状态。"""
         with self._lock:
             q = self.requests.get(uid)
         if q is None:
