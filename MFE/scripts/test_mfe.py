@@ -34,6 +34,7 @@ from datasets import load_dataset, concatenate_datasets, Dataset
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from halo.serve.mfe_server import run_mfe_server
+from mfe.config import is_verbose, set_verbose
 
 
 # ---------------------------------------------------------------------------
@@ -213,7 +214,7 @@ def main() -> None:
     args = parser.parse_args()
 
     if args.verbose:
-        os.environ["MFE_VERBOSE"] = "1"
+        set_verbose(True)
 
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     os.chdir(root)
@@ -239,7 +240,7 @@ def main() -> None:
 
     server_proc = mp.Process(
         target=run_mfe_server,
-        args=(request_queue, response_queue, templates_dir_abs, args.test_worker, args.verbose),
+        args=(request_queue, response_queue, templates_dir_abs, args.test_worker),
         daemon=False,
     )
     server_proc.start()
@@ -249,7 +250,7 @@ def main() -> None:
     node_elapsed: Dict[str, List[float]] = {}
 
     for req in requests:
-        if args.verbose:
+        if is_verbose():
             pid = str(req.get("id", ""))[:8]
             tpl = req.get("template", "")
             prompt_preview = (req.get("prompt", "") or "")[:70]
@@ -265,7 +266,7 @@ def main() -> None:
             bench = resp["result"].get("benchmark") or {}
             for op_id, (start, end) in bench.items():
                 node_elapsed.setdefault(op_id, []).append(end - start)
-            if args.verbose:
+            if is_verbose():
                 rid = str(resp.get("id", ""))[:8]
                 total = resp["result"].get("total_answer_time")
                 # 按节点开始时间排序，得到询问经过的链路
@@ -277,7 +278,7 @@ def main() -> None:
                 print(f"[RSP] id={rid} ok total_answer_time={total:.3f}s path=[ {path_str} ] op_output_keys={out_keys}")
         else:
             errors.append(resp.get("error", "unknown"))
-            if args.verbose:
+            if is_verbose():
                 print(f"[RSP] id={str(resp.get('id',''))[:8]} ok=False error={resp.get('error', 'unknown')}")
 
     request_queue.put(None)

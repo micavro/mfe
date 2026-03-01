@@ -13,6 +13,7 @@ from typing import Any, Dict
 
 from halo.components import Query
 from halo.optimizers.mfe_v import OptimizerMFE
+from mfe.config import is_verbose
 
 logger = logging.getLogger(__name__)
 
@@ -46,7 +47,6 @@ def run_mfe_server(
     response_queue,
     templates_dir: str = "templates",
     use_test_worker: bool | None = None,
-    verbose: bool = False,
 ) -> None:
     """
     在当前进程内运行 MFE 服务循环。
@@ -57,7 +57,7 @@ def run_mfe_server(
     use_test_worker: 若为 True，使用 TestWorker（不依赖 vLLM/GPU）；默认从环境变量 MFE_USE_TEST_WORKER 读取。
     verbose: 若为 True，打印每条请求/执行完成的中间信息。
     """
-    opt = OptimizerMFE(templates_dir=templates_dir, use_test_worker=use_test_worker, verbose=verbose)
+    opt = OptimizerMFE(templates_dir=templates_dir, use_test_worker=use_test_worker)
     try:
         while True:
             req = request_queue.get()
@@ -74,12 +74,12 @@ def run_mfe_server(
             if not template:
                 response_queue.put(_build_response_error(req_id, "missing or empty 'template'"))
                 continue
-            if verbose:
+            if is_verbose():
                 print(f"[SERVER] recv id={str(req_id)[:8]} template={template} prompt_len={len(prompt or '')}")
             try:
                 query = Query(id=req_id, prompt=prompt, template=template)
                 query = opt.execute_one(query)
-                if verbose:
+                if is_verbose():
                     total = (max(query.benchmark[k][1] for k in query.benchmark) - query.create_time) if query.benchmark else 0
                     print(f"[SERVER] done id={str(req_id)[:8]} total_answer_time={total:.3f}s op_output_keys={list(query.op_output.keys())}")
                 response_queue.put(_build_response_ok(req_id, query))

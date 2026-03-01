@@ -12,7 +12,7 @@
 
 from typing import List, Dict
 from collections import deque
-from halo.components import Operator, Query
+from mfe.components import Operator, Query
 
 
 def _topo_order(all_ops: List[Operator]) -> List[Operator]:
@@ -64,11 +64,7 @@ def _topo_order(all_ops: List[Operator]) -> List[Operator]:
     return topo
 
 
-def schedule_rr(
-    device_cnt: int,
-    all_ops: List[Operator],
-    queries: List[Query],
-) -> List[List[Dict]]:
+def schedule_rr(device_cnt: int, all_ops: List[Operator], queries: List[Query]) -> List[List[Dict]]:
     """
     轮询调度：按照拓扑顺序，将每个 OP 轮询分配到设备上
     

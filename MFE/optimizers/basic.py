@@ -18,6 +18,7 @@ from mfe.parser import load_config, build_ops_from_config
 from mfe.schedulers import schedule_rr
 from mfe.components import Operator, ExecuteInfo, Query
 from mfe.util import _visible_physical_gpu_ids
+from mfe.config import is_verbose
 
 logger = getLogger(__name__)
 logger.setLevel("INFO")
@@ -39,7 +40,7 @@ class Optimizer:
     execute_one(query)：取 query.template 的 DAG → schedule_rr → 派发并收集结果，返回执行后的 Query。
     """
 
-    def __init__(self, templates_dir: str = "templates", use_test_worker: bool | None = None, verbose: bool = False, **kwargs) -> None:
+    def __init__(self, templates_dir: str = "templates", use_test_worker: bool | None = None, **kwargs) -> None:
         self.templates_dir = os.path.abspath(templates_dir)
         self._template_cache: Dict[str, Tuple[Dict[str, Operator], List[Operator], List[Operator], Any]] = {}
 
@@ -52,7 +53,6 @@ class Optimizer:
         if use_test_worker is None:
             use_test_worker = os.environ.get("MFE_USE_TEST_WORKER", "").lower() in ("1", "true", "yes")
         self._use_test_worker = use_test_worker
-        self._verbose = bool(verbose or os.environ.get("MFE_VERBOSE", "").lower() in ("1", "true", "yes"))
 
         self.device_cnt = torch.cuda.device_count()
         if self._use_test_worker and self.device_cnt == 0:
@@ -137,7 +137,7 @@ class Optimizer:
         self.queries = [query]
         self.req_id_map = {query.id: query}
         self.schedule(self.queries, strategy="rr")
-        if self._verbose:
+        if is_verbose():
             print(f"[OPT] query id={str(query.id)[:8]} template={query.template} DAG_ops={list(self.ops.keys())}")
 
         finish_flags = [False] * self.device_cnt
@@ -187,7 +187,7 @@ class Optimizer:
                 return
             task = self.workflows[i][worker_pointer[i]]
             if _task_ready(task):
-                if self._verbose and task.get("command") == "execute":
+                if is_verbose() and task.get("command") == "execute":
                     op, qids = task["params"][0], task["params"][1]
                     print(f"[OPT] -> Worker {i} op={op.id} query_ids={qids} t={time.perf_counter():.3f}")
                 self.cmd_queues[i].put(_cmd_transfer(task))
@@ -216,7 +216,7 @@ class Optimizer:
                 if cmd == "execute":
                     result = message.get("result", {})
                     op_name = result.get("op_name") or result.get("node_name")
-                    if self._verbose and op_name is not None:
+                    if is_verbose() and op_name is not None:
                         qids = [rec["id"] for rec in result.get("item", [])]
                         print(f"[OPT] <- Worker {i} op_name={op_name} query_ids={qids} t={time.perf_counter():.3f}")
                     if op_name is not None:

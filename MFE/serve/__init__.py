@@ -1,10 +1,15 @@
 """
-Serve 模块：MFE 双 Queue 服务
+Serve 模块：MFE 服务
 
-提供 run_mfe_server：从 request_queue 取请求（id, prompt, template），
-调用 OptimizerMFE 执行单请求完整 DAG，将响应（含 op_output、benchmark、total_answer_time）写入 response_queue。
+- run_server: 多请求异步 Server (submit/status API)
+- run_mfe_server: 单请求双 Queue 服务（需 halo）
 """
 
-from halo.serve.mfe_server import run_mfe_server
+from .server import run_server
 
-__all__ = ["run_mfe_server"]
+try:
+    from halo.serve.mfe_server import run_mfe_server
+except ImportError:
+    run_mfe_server = None
+
+__all__ = ["run_server", "run_mfe_server"]

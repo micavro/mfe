@@ -29,7 +29,8 @@ warnings.filterwarnings("ignore", category=FutureWarning, message=".*pynvml.*")
 import torch
 
 # Project-local types
-from halo.components import Query, Operator, ModelConfig, ExecuteInfo
+from mfe.components import Query, Operator, ModelConfig, ExecuteInfo
+from mfe.config import is_verbose
 
 # vLLM / transformers 延迟导入，避免仅使用 TestWorker 时因未安装 vLLM 而报错
 
@@ -358,8 +359,7 @@ class vLLMWorker:
                 self.response_queue.put({"command": "exit", "result": out, "elapsed_time": 0.0})
                 break  # 退出循环
 
-            _verbose = os.environ.get("MFE_VERBOSE", "").lower() in ("1", "true", "yes")
-            if _verbose and command == "execute" and params:
+            if is_verbose() and command == "execute" and params:
                 exe = params[0]
                 op_id = getattr(exe.op, "id", "?")
                 qids = getattr(exe, "query_ids", [])
@@ -384,7 +384,7 @@ class vLLMWorker:
                 elapsed = time.perf_counter() - start
                 # 返回成功结果
                 self.response_queue.put({"command": command, "result": result, "elapsed_time": elapsed})
-                if _verbose and command == "execute" and isinstance(result, dict):
+                if is_verbose() and command == "execute" and isinstance(result, dict):
                     print(f"[Worker {self.id}] sent result op_name={result.get('op_name', '?')} elapsed={elapsed:.3f}s")
             except Exception as e:
                 if debug:
@@ -396,7 +396,7 @@ class vLLMWorker:
 
 if __name__ == '__main__':
     import queue
-    from halo.components import Query, Operator, ModelConfig, ExecuteInfo
+    from mfe.components import Query, Operator, ModelConfig, ExecuteInfo
 
     query = Query(0, "What is the capital of France?")
     model = "meta-llama/Llama-3.2-3B-Instruct"

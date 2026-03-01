@@ -13,7 +13,8 @@ import time
 import logging
 from typing import Any, Dict, List
 
-from halo.components import ExecuteInfo
+from mfe.components import ExecuteInfo
+from mfe.config import is_verbose
 
 logger = logging.getLogger(__name__)
 
@@ -47,10 +48,15 @@ class TestWorker:
     def execute(self, exe_info: ExecuteInfo) -> Dict[str, Any]:
         """
         直接返回每个 prompt 作为对应 output，并构造与 vLLMWorker 一致的返回结构。
+        可通过 MFE_TEST_WORKER_DELAY 环境变量设置模拟延迟（秒），默认 20。
         """
         op = exe_info.op
         op_name = getattr(op, "id", "op_unknown")
         is_duplicate = getattr(op, "is_duplicate", False)
+
+        delay = float(os.environ.get("MFE_TEST_WORKER_DELAY", "20"))
+        if delay > 0:
+            time.sleep(delay)
 
         start = time.perf_counter()
         results: List[Dict[str, Any]] = []
@@ -100,14 +106,13 @@ class TestWorker:
                 self.response_queue.put({"command": "exit", "result": out, "elapsed_time": 0.0})
                 break
 
-            _verbose = os.environ.get("MFE_VERBOSE", "").lower() in ("1", "true", "yes")
-            if _verbose and command == "execute" and params:
+            if is_verbose() and command == "execute" and params:
                 exe = params[0]
                 op_id = getattr(exe.op, "id", "?")
                 qids = getattr(exe, "query_ids", [])
                 prompts = getattr(exe, "prompts", [])
                 p0 = (prompts[0][:50] + "...") if prompts and len(prompts[0]) > 50 else (prompts[0] if prompts else "")
-                print(f"[Worker {self.id}] recv execute op={op_id} query_ids={qids} n_prompts={len(prompts)} prompt0={p0!r}")
+                print(f"[Worker {self.id}] recv execute op={op_id} query_ids={qids} n_prompts={len(prompts)} prompt0={p0!r}", flush=True)
 
             func = getattr(self, command, None)
             if not callable(func):
@@ -121,8 +126,8 @@ class TestWorker:
                 result = func(*params) if params else func()
                 elapsed = time.perf_counter() - start
                 self.response_queue.put({"command": command, "result": result, "elapsed_time": elapsed})
-                if _verbose and command == "execute" and isinstance(result, dict):
-                    print(f"[Worker {self.id}] sent result op_name={result.get('op_name', '?')} elapsed={elapsed:.3f}s")
+                if is_verbose() and command == "execute" and isinstance(result, dict):
+                    print(f"[Worker {self.id}] sent result op_name={result.get('op_name', '?')} elapsed={elapsed:.3f}s", flush=True)
             except Exception as e:
                 if debug:
                     raise

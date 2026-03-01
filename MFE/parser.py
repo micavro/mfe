@@ -35,24 +35,12 @@ from typing import Dict, List, Set, Tuple
 import yaml
 import torch
 
-from halo.components import Operator, ModelConfig
+from mfe.components import Operator, ModelConfig
 
 
 # ---------------- Public API ---------------- #
 
 def load_config(config_path: str) -> dict:
-    """
-    从文件路径加载 YAML 配置文件并解析为 Python 字典
-    
-    Args:
-        config_path: YAML 配置文件的路径
-        
-    Returns:
-        dict: 解析后的配置字典，包含 'ops'、'start_ops'、'end_ops' 等键
-        
-    Note:
-        使用 yaml.safe_load 安全地解析 YAML，避免执行任意代码
-    """
     with open(config_path, "r") as f:
         return yaml.safe_load(f)
 
@@ -68,7 +56,6 @@ def build_ops_from_config(config: dict) -> Tuple[Dict[str, Operator], List[Opera
     end_ops    : list[Operator]
     models     : set[str]
     """
-    # --- 验证必需字段：检查配置的完整性和正确性 ---
     conf_ops = config.get("ops")
     if not isinstance(conf_ops, dict) or not conf_ops:
         raise ValueError("Config must contain a non-empty 'ops' mapping.")
@@ -79,25 +66,18 @@ def build_ops_from_config(config: dict) -> Tuple[Dict[str, Operator], List[Opera
     if not isinstance(end_keys, list) or not end_keys:
         raise ValueError("'end_ops' must be a non-empty list of op ids.")
 
-    # --- 创建 Operator 对象：为每个 OP ID 创建一个空的 Operator 对象 ---
-    # 这些对象稍后会被填充依赖关系和配置信息
     ops: Dict[str, Operator] = {oid: Operator(id=oid) for oid in conf_ops.keys()}
 
-    # --- 验证引用和必需字段：确保配置的正确性 ---
     for oid, spec in conf_ops.items():
-        # 每个 OP 必须有 model 字段
         if "model" not in spec:
             raise ValueError(f"Op '{oid}' is missing required field 'model'.")
-        # 获取输入输出依赖关系
-        in_ids = spec.get("input_ops", []) or []   # 前驱节点 ID 列表
-        out_ids = spec.get("output_ops", []) or []  # 后继节点 ID 列表
-        # 验证引用的 OP ID 是否存在
+        in_ids = spec.get("input_ops", []) or []
+        out_ids = spec.get("output_ops", []) or []
         for rid in in_ids + out_ids:
             if rid not in ops:
                 raise ValueError(f"Op '{oid}' references unknown op '{rid}' in inputs/outputs.")
 
-    # --- 建立依赖关系、附加 ModelConfig、初始化运行时字段 ---
-    models: Set[str] = set()  # 收集所有使用的模型名称
+    models: Set[str] = set()
     for oid, op in ops.items():
         spec = conf_ops[oid]
         input_ids = spec.get("input_ops", []) or []   # 前驱节点 ID 列表
@@ -112,12 +92,6 @@ def build_ops_from_config(config: dict) -> Tuple[Dict[str, Operator], List[Opera
         models.add(model)
 
         # keep_cache 推断逻辑：
-        # 1. 如果配置中显式指定了 keep_cache，则使用该值
-        # 2. 否则，如果该 OP 的任意后继节点使用相同模型，则自动推断为 True
-        #    这样可以优化性能：如果下游 OP 使用相同模型，保留 cache 可以避免重复计算前缀
-        explicit_keep = spec.get("keep_cache", None)
-        inferred_keep = any(conf_ops[oid2]["model"] == model for oid2 in output_ids)
-        op.keep_cache = bool(explicit_keep) if explicit_keep is not None else inferred_keep
 
         op.model_config = ModelConfig(
             model_name=model,
@@ -156,81 +130,37 @@ def build_ops_from_config(config: dict) -> Tuple[Dict[str, Operator], List[Opera
 
 
 def build_from_path(config_path: str) -> Tuple[Dict[str, Operator], List[Operator], List[Operator], Set[str]]:
-    """
-    便捷函数：一次性完成配置加载和图构建
-    
-    Args:
-        config_path: YAML 配置文件的路径
-        
-    Returns:
-        Tuple[Dict[str, Operator], List[Operator], List[Operator], Set[str]]:
-            - ops: op_id -> Operator 的字典
-            - start_ops: 起始节点列表
-            - end_ops: 终止节点列表
-            - models: 所有使用的模型名称集合
-            
-    Note:
-        这是 load_config 和 build_ops_from_config 的组合，简化调用
-    """
     return build_ops_from_config(load_config(config_path))
 
 
 # ---------------- Internals ---------------- #
 
 def _compute_max_distances(ops: Dict[str, Operator], end_ops: List[Operator]) -> None:
-    """
-    为每个 OP 计算到任意终点 OP 的最长路径长度（边数），同时检测循环依赖
-    
-    使用深度优先搜索（DFS）和记忆化技术，时间复杂度 O(V + E)。
-    如果检测到循环依赖，会抛出 ValueError。
-    
-    Args:
-        ops: 所有 Operator 的字典
-        end_ops: 终点节点列表
-        
-    Raises:
-        ValueError: 如果检测到图中存在循环依赖
-        
-    Note:
-        - 如果 OP 无法到达任何终点，其距离为 -1
-        - max_distance 字段用于调度优化：距离终点越远的节点通常应该优先执行
-    """
-    end_set = set(end_ops)  # 终点节点集合，用于快速查找
-    memo: Dict[Operator, int] = {}  # 记忆化：避免重复计算
-    visiting: Set[Operator] = set()  # 当前访问路径，用于循环检测
+    end_set = set(end_ops)
+    memo: Dict[Operator, int] = {}
+    visiting: Set[Operator] = set()
 
     def dfs(op: Operator) -> int:
-        """
-        深度优先搜索：计算 op 到任意终点的最长距离
-        
-        Returns:
-            int: 最长距离（边数），如果无法到达终点则返回 -1
-        """
-        # 记忆化：如果已经计算过，直接返回
         if op in memo:
             return memo[op]
-        # 循环检测：如果访问到正在访问的节点，说明存在环
         if op in visiting:
             raise ValueError("Cycle detected in the op graph.")
-        visiting.add(op)  # 标记为正在访问
+        visiting.add(op)
 
-        # 如果当前节点是终点，距离为 0
         if op in end_set:
             memo[op] = 0
             visiting.remove(op)
             return 0
 
-        # 递归计算所有后继节点的距离，取最大值
-        best = -1  # -1 表示无法到达终点
+        best = -1
         for child in op.output_ops:
             d = dfs(child)
-            if d != -1:  # 如果后继节点可以到达终点
-                best = max(best, d + 1)  # 当前节点距离 = 后继节点距离 + 1
+            if d != -1:
+                best = max(best, d + 1) 
 
-        memo[op] = best  # 记录结果
-        visiting.remove(op)  # 移除访问标记
+        memo[op] = best
+        visiting.remove(op)
         return best
 
-    # 为所有 OP 计算距离并写入 max_distance 字段
     for op in ops.values():
         op.max_distance = dfs(op)
