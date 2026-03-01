@@ -7,7 +7,6 @@
 from __future__ import annotations
 
 import os
-import random
 import sys
 import threading
 import time
@@ -91,17 +90,21 @@ def send_test(
     client: Client,
     templates_dir: str,
     num_requests: int = 5,
-    delay_range: tuple = (1.0, 5.0),
-    template: str = "adv_reason_3.yaml",
+    send_interval: float = 0.5,
+    templates: Optional[List[str]] = None,
 ) -> List[str]:
     """
-    模拟随机时间点发送若干请求。
+    按固定间隔发送请求，可轮换使用多个 YAML 策略。
     返回 uid 列表。
     """
-    tpl = template if template.endswith(".yaml") else f"{template}.yaml"
+    if templates is None or len(templates) == 0:
+        templates = ["adv_reason_3.yaml"]
+    tpls = [t if t.endswith(".yaml") else f"{t}.yaml" for t in templates]
     uids: List[str] = []
     for i in range(num_requests):
-        time.sleep(random.uniform(*delay_range))
+        if i > 0:
+            time.sleep(send_interval)
+        tpl = tpls[i % len(tpls)]
         prompt = f"Question {i+1}"
         uid = client.submit(tpl, prompt)
         uids.append(uid)
@@ -112,14 +115,18 @@ def main() -> None:
     import argparse
     p = argparse.ArgumentParser(description="MFE 多请求 Client")
     p.add_argument("--templates-dir", default="templates", help="工作流 YAML 目录")
-    p.add_argument("--template", default="adv_reason_3.yaml", help="默认工作流")
-    p.add_argument("-n", "--num", type=int, default=5, help="send_test 请求数")
+    p.add_argument("--templates", nargs="+", default=None, help="轮换使用的 YAML 列表，如 adv_reason_3.yaml adv_reason_4m.yaml")
+    p.add_argument("-n", "--num", type=int, default=5, help="请求数")
+    p.add_argument("--send-interval", type=float, default=0.5, help="发送间隔（秒）")
+    p.add_argument("--worker-delay", type=float, default=None, help="TestWorker 模拟延迟（秒），如 2")
     p.add_argument("--test-worker", action="store_true", help="使用 TestWorker")
     p.add_argument("-v", "--verbose", action="store_true")
     args = p.parse_args()
 
     if args.verbose:
         set_verbose(True)
+    if args.worker_delay is not None:
+        os.environ["MFE_TEST_WORKER_DELAY"] = str(args.worker_delay)
 
     req_q = mp.Queue()
     resp_q = mp.Queue()
@@ -136,26 +143,26 @@ def main() -> None:
 
     client = Client(req_q, resp_q)
     try:
-        uids = send_test(client, templates_abs, num_requests=args.num, template=args.template)
-        print(f"\nPolling status for {len(uids)} requests...")
+        templates_list = args.templates or ["adv_reason_3.yaml", "adv_reason_4m.yaml", "multi_step_retrival.yaml"]
+        uids = send_test(
+            client, templates_abs,
+            num_requests=args.num,
+            send_interval=args.send_interval,
+            templates=templates_list,
+        )
         completed = set()
-        last_status: Dict[str, str] = {}
         while len(completed) < len(uids):
             for uid in uids:
                 if uid in completed:
                     continue
                 st = client.status(uid)
-                if st:
-                    s = st.get("status", "")
-                    if last_status.get(uid) != s:
-                        last_status[uid] = s
-                        print(f"  uid={uid[:8]}... status={s}")
-                    if s == "completed":
-                        completed.add(uid)
-                        t = st.get("total_answer_time")
-                        if t is not None:
-                            print(f"    total_answer_time={t:.3f}s")
+                if st and st.get("status") == "completed":
+                    completed.add(uid)
+                    t = st.get("total_answer_time")
+                    if t is not None:
+                        print(f"  uid={uid[:8]}... completed in {t:.2f}s")
             time.sleep(0.5)
+        print(f"Done. {len(completed)}/{len(uids)} completed.")
     finally:
         client.close()
         proc.join(timeout=5.0)
