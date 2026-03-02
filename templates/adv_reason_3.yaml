@@ -23,7 +23,7 @@ ops:
 
   op2:
     model: ../models/Llama-3.1-8B-Instruct/
-    prompt: "Please rethink and give your final answer considering the critique before. You should and should only put the final answer in the output."
+    prompt: "Please rethink and give your final answer considering the critique before. You should and should only put the final answer in the output. No other text should be in the output (including punctuation marks)."
     max_tokens: 1024
     input_ops:
       - op1
