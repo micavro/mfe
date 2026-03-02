@@ -29,7 +29,4 @@ class Operator:
         self.prompt = prompt
         self.model_config = model_config
         self.benchmark = Benchmark()
-        self.data_parallel = False
         self.is_duplicate = False
-        self.main_op = None
-        self.duplicate_info = None

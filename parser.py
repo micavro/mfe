@@ -60,10 +60,7 @@ def build_ops_from_config(config: dict) -> Tuple[Dict[str, Operator], List[Opera
             min_tokens=spec.get("min_tokens", 0),
             use_chat_template=spec.get("use_chat_template", True),
         )
-        op.data_parallel = False
         op.is_duplicate = False
-        op.duplicate_info = None
-        op.main_op = None
         op.max_distance = -1
 
     for k in start_keys + end_keys:
