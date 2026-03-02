@@ -32,7 +32,7 @@ ops:
 
   op3:
     model: ../models/Llama-3.1-8B-Instruct/
-    prompt: "Please give your final answer considering the critique before."
+    prompt: "Please check your final answer considering the critique before. You should and should only put the final answer in the output."
     max_tokens: 1024
     input_ops:
       - op2

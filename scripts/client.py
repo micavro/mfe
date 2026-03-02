@@ -96,16 +96,37 @@ def send_test(client: Client, templates_dir: str, num_requests: int = 5, send_in
     return uids
 
 
+def _strip_chat_template(raw: str) -> str:
+    """从 Llama chat template 原始输出中提取最后一个 assistant 回复。"""
+    if not raw:
+        return ""
+    marker = "assistant\n\n"
+    idx = raw.rfind(marker)
+    if idx < 0:
+        return raw.strip()
+    result = raw[idx + len(marker):]
+    if result.endswith("<|eot_id|>"):
+        result = result[:-10]
+    return result.strip()
+
+
 def _extract_final_answer(st: Dict[str, Any]) -> str:
-    """从 status 的 op_output 中取最后完成节点的输出作为最终答案。"""
+    """从 status 的 op_output 中取最后节点新增的输出，并剔除 chat template，得到纯文本答案。"""
     op_output = st.get("op_output", {}) or {}
     benchmark = st.get("benchmark", {}) or {}
     if not op_output:
         return ""
     if not benchmark:
-        return next(iter(op_output.values()), "")
-    last_op = max(benchmark.keys(), key=lambda k: benchmark[k][1] if k in benchmark else 0)
-    return op_output.get(last_op, "")
+        return _strip_chat_template(next(iter(op_output.values()), ""))
+    sorted_ops = sorted(benchmark.keys(), key=lambda k: benchmark[k][1] if k in benchmark else 0)
+    last_op = sorted_ops[-1]
+    full_last = op_output.get(last_op, "")
+    if len(sorted_ops) > 1:
+        prev_op = sorted_ops[-2]
+        prefix = op_output.get(prev_op, "")
+        if full_last.startswith(prefix):
+            full_last = full_last[len(prefix):].strip()
+    return _strip_chat_template(full_last)
 
 
 def run_data_test(
