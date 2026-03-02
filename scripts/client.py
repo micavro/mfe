@@ -156,7 +156,7 @@ def run_data_test(
             if st and st.get("status") == "completed":
                 item = questions[i]
                 answer = _extract_final_answer(st)
-                completed[uid] = {
+                out_item: Dict[str, Any] = {
                     "question": item.get("question", ""),
                     "yaml": item.get("yaml", ""),
                     "answer": answer,
@@ -165,6 +165,9 @@ def run_data_test(
                     "total_answer_time": st.get("total_answer_time"),
                     "uid": uid,
                 }
+                if "gold_answer" in item:
+                    out_item["gold_answer"] = item["gold_answer"]
+                completed[uid] = out_item
                 if is_verbose() and st.get("total_answer_time") is not None:
                     print(f"  [{i+1}/{len(uids)}] uid={uid[:8]}... completed in {st['total_answer_time']:.2f}s", flush=True)
         now = time.perf_counter()
