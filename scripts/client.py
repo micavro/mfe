@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""多请求 Client：submit/status/send_test，通过 Queue 与 Server 通信。"""
+"""多请求 Client：submit/status/send_test，通过 Queue 与 Server 通信。支持 JSON 输入/输出做数据测试。"""
 
 from __future__ import annotations
 
+import json
 import os
 import sys
 import threading
@@ -95,12 +96,68 @@ def send_test(client: Client, templates_dir: str, num_requests: int = 5, send_in
     return uids
 
 
+def _extract_final_answer(st: Dict[str, Any]) -> str:
+    """从 status 的 op_output 中取最后完成节点的输出作为最终答案。"""
+    op_output = st.get("op_output", {}) or {}
+    benchmark = st.get("benchmark", {}) or {}
+    if not op_output:
+        return ""
+    if not benchmark:
+        return next(iter(op_output.values()), "")
+    last_op = max(benchmark.keys(), key=lambda k: benchmark[k][1] if k in benchmark else 0)
+    return op_output.get(last_op, "")
+
+
+def run_data_test(
+    client: Client,
+    questions: List[Dict[str, Any]],
+    send_interval: float = 0.0,
+) -> List[Dict[str, Any]]:
+    """发送所有问题、等待完成、返回结果列表。questions 每项需有 question、yaml。"""
+    uids: List[str] = []
+    for i, item in enumerate(questions):
+        if i > 0 and send_interval > 0:
+            time.sleep(send_interval)
+        q = item.get("question", "")
+        yaml_name = item.get("yaml", "adv_reason_3.yaml")
+        if not yaml_name.endswith(".yaml"):
+            yaml_name = f"{yaml_name}.yaml"
+        uid = client.submit(yaml_name, q)
+        uids.append(uid)
+
+    completed: Dict[str, Dict[str, Any]] = {}
+    while len(completed) < len(uids):
+        for i, uid in enumerate(uids):
+            if uid in completed:
+                continue
+            st = client.status(uid)
+            if st and st.get("status") == "completed":
+                item = questions[i]
+                answer = _extract_final_answer(st)
+                completed[uid] = {
+                    "question": item.get("question", ""),
+                    "yaml": item.get("yaml", ""),
+                    "answer": answer,
+                    "op_output": st.get("op_output", {}),
+                    "benchmark": st.get("benchmark", {}),
+                    "total_answer_time": st.get("total_answer_time"),
+                    "uid": uid,
+                }
+                if is_verbose() and st.get("total_answer_time") is not None:
+                    print(f"  [{i+1}/{len(uids)}] uid={uid[:8]}... completed in {st['total_answer_time']:.2f}s")
+        time.sleep(0.5)
+
+    return [completed[uid] for uid in uids]
+
+
 def main() -> None:
     import argparse
     p = argparse.ArgumentParser(description="MFE 多请求 Client")
-    p.add_argument("--templates-dir", default="templates", help="工作流 YAML 目录")
-    p.add_argument("--templates", nargs="+", default=None, help="轮换使用的 YAML 列表，如 adv_reason_3.yaml adv_reason_4m.yaml")
-    p.add_argument("-n", "--num", type=int, default=5, help="请求数")
+    p.add_argument("--templates-dir", default="mfe/templates", help="工作流 YAML 目录")
+    p.add_argument("--input-json", default=None, help="输入 JSON 文件，每项含 question、yaml")
+    p.add_argument("--output-json", default=None, help="输出 JSON 文件，保存答案等")
+    p.add_argument("--templates", nargs="+", default=None, help="轮换使用的 YAML 列表（默认测试用）")
+    p.add_argument("-n", "--num", type=int, default=5, help="请求数（默认测试用）")
     p.add_argument("--send-interval", type=float, default=0.5, help="发送间隔（秒）")
     p.add_argument("--worker-delay", type=float, default=None, help="TestWorker 模拟延迟（秒），如 2")
     p.add_argument("--test-worker", action="store_true", help="使用 TestWorker")
@@ -127,26 +184,37 @@ def main() -> None:
 
     client = Client(req_q, resp_q)
     try:
-        templates_list = args.templates or ["adv_reason_3.yaml", "adv_reason_4m.yaml", "multi_step_retrival.yaml"]
-        uids = send_test(
-            client, templates_abs,
-            num_requests=args.num,
-            send_interval=args.send_interval,
-            templates=templates_list,
-        )
-        completed = set()
-        while len(completed) < len(uids):
-            for uid in uids:
-                if uid in completed:
-                    continue
-                st = client.status(uid)
-                if st and st.get("status") == "completed":
-                    completed.add(uid)
-                    t = st.get("total_answer_time")
-                    if t is not None:
-                        print(f"  uid={uid[:8]}... completed in {t:.2f}s")
-            time.sleep(0.5)
-        print(f"Done. {len(completed)}/{len(uids)} completed.")
+        if args.input_json and args.output_json:
+            with open(args.input_json, "r", encoding="utf-8") as f:
+                questions = json.load(f)
+            if not isinstance(questions, list):
+                questions = [questions]
+            print(f"Loaded {len(questions)} questions from {args.input_json}")
+            results = run_data_test(client, questions, send_interval=args.send_interval)
+            with open(args.output_json, "w", encoding="utf-8") as f:
+                json.dump(results, f, ensure_ascii=False, indent=2)
+            print(f"Saved {len(results)} results to {args.output_json}")
+        else:
+            templates_list = args.templates or ["adv_reason_3.yaml", "adv_reason_4m.yaml", "multi_step_retrival.yaml"]
+            uids = send_test(
+                client, templates_abs,
+                num_requests=args.num,
+                send_interval=args.send_interval,
+                templates=templates_list,
+            )
+            completed = set()
+            while len(completed) < len(uids):
+                for uid in uids:
+                    if uid in completed:
+                        continue
+                    st = client.status(uid)
+                    if st and st.get("status") == "completed":
+                        completed.add(uid)
+                        t = st.get("total_answer_time")
+                        if t is not None:
+                            print(f"  uid={uid[:8]}... completed in {t:.2f}s")
+                time.sleep(0.5)
+            print(f"Done. {len(completed)}/{len(uids)} completed.")
     finally:
         client.close()
         proc.join(timeout=5.0)
