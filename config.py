@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-_verbose: bool = False
+_verbose: bool = True
 
 
 def is_verbose() -> bool:
