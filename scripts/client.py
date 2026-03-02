@@ -126,6 +126,7 @@ def run_data_test(
         uids.append(uid)
 
     completed: Dict[str, Dict[str, Any]] = {}
+    last_progress = 0.0
     while len(completed) < len(uids):
         for i, uid in enumerate(uids):
             if uid in completed:
@@ -144,7 +145,11 @@ def run_data_test(
                     "uid": uid,
                 }
                 if is_verbose() and st.get("total_answer_time") is not None:
-                    print(f"  [{i+1}/{len(uids)}] uid={uid[:8]}... completed in {st['total_answer_time']:.2f}s")
+                    print(f"  [{i+1}/{len(uids)}] uid={uid[:8]}... completed in {st['total_answer_time']:.2f}s", flush=True)
+        now = time.perf_counter()
+        if len(completed) < len(uids) and now - last_progress >= 10.0:
+            print(f"  ... waiting: {len(completed)}/{len(uids)} completed", flush=True)
+            last_progress = now
         time.sleep(0.5)
 
     return [completed[uid] for uid in uids]
@@ -153,7 +158,7 @@ def run_data_test(
 def main() -> None:
     import argparse
     p = argparse.ArgumentParser(description="MFE 多请求 Client")
-    p.add_argument("--templates-dir", default="mfe/templates", help="工作流 YAML 目录")
+    p.add_argument("--templates-dir", default="templates", help="工作流 YAML 目录")
     p.add_argument("--input-json", default=None, help="输入 JSON 文件，每项含 question、yaml")
     p.add_argument("--output-json", default=None, help="输出 JSON 文件，保存答案等")
     p.add_argument("--templates", nargs="+", default=None, help="轮换使用的 YAML 列表（默认测试用）")
@@ -166,6 +171,7 @@ def main() -> None:
 
     if args.verbose:
         set_verbose(True)
+        os.environ["MFE_VERBOSE"] = "1"  # 子进程 server/worker 继承
     if args.worker_delay is not None:
         os.environ["MFE_TEST_WORKER_DELAY"] = str(args.worker_delay)
 
@@ -191,9 +197,11 @@ def main() -> None:
                 questions = [questions]
             print(f"Loaded {len(questions)} questions from {args.input_json}")
             results = run_data_test(client, questions, send_interval=args.send_interval)
-            with open(args.output_json, "w", encoding="utf-8") as f:
+            out_path = os.path.abspath(args.output_json)
+            os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
+            with open(out_path, "w", encoding="utf-8") as f:
                 json.dump(results, f, ensure_ascii=False, indent=2)
-            print(f"Saved {len(results)} results to {args.output_json}")
+            print(f"Saved {len(results)} results to {out_path}")
         else:
             templates_list = args.templates or ["adv_reason_3.yaml", "adv_reason_4m.yaml", "multi_step_retrival.yaml"]
             uids = send_test(
