@@ -1,39 +1,26 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""将下载的数据集处理为 client 可用的 JSON 格式（question、yaml、gold_answer）。"""
+"""将下载的数据集处理为 client 可用的格式，透传原数据集的全部字段。"""
 
 from __future__ import annotations
 
 import argparse
 import json
 import os
-import re
 from typing import Any, Dict, List
 
 
-def _extract_gsm8k_answer(raw: str) -> str:
-    """GSM8K 答案在 #### 之后。"""
-    if "####" in raw:
-        return raw.split("####")[-1].strip()
-    return raw.strip()
-
-
-def _extract_math_answer(raw: str) -> str:
-    """MATH 答案在 \\boxed{} 内。"""
-    m = re.search(r"\\boxed\{([^{}]*(?:\{[^{}]*\}[^{}]*)*)\}", raw)
-    if m:
-        return m.group(1).strip()
-    return raw.strip()
-
-
-def _get_drop_answer(obj: Any) -> str:
-    """DROP answers_spans.spans 取第一个，或合并。"""
-    if not obj or not isinstance(obj, dict):
-        return ""
-    spans = obj.get("spans", [])
-    if isinstance(spans, list) and spans:
-        return str(spans[0]).strip()
-    return ""
+def _to_json_safe(obj: Any) -> Any:
+    """将 numpy 等类型转为 JSON 可序列化格式。"""
+    if hasattr(obj, "tolist"):
+        return obj.tolist()
+    if hasattr(obj, "item"):
+        return obj.item()
+    if isinstance(obj, dict):
+        return {k: _to_json_safe(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_to_json_safe(x) for x in obj]
+    return obj
 
 
 def process_drop(data_dir: str, limit: int | None) -> List[Dict[str, Any]]:
@@ -44,11 +31,12 @@ def process_drop(data_dir: str, limit: int | None) -> List[Dict[str, Any]]:
     df = pd.read_parquet(path)
     out = []
     for _, row in df.iterrows():
-        passage = row.get("passage", "") or ""
-        question = row.get("question", "") or ""
-        q_text = f"Passage:\n{passage}\n\nQuestion:\n{question}"
-        gold = _get_drop_answer(row.get("answers_spans"))
-        out.append({"question": q_text, "gold_answer": gold})
+        row_d = _to_json_safe(row.to_dict())
+        passage = row_d.get("passage", "") or ""
+        question_short = row_d.get("question", "") or ""
+        row_d["question_short"] = question_short
+        row_d["question"] = f"Passage:\n{passage}\n\nQuestion:\n{question_short}"
+        out.append(row_d)
         if limit and len(out) >= limit:
             break
     return out
@@ -62,8 +50,10 @@ def process_hotpotqa(data_dir: str, limit: int | None) -> List[Dict[str, Any]]:
     df = pd.read_parquet(path)
     out = []
     for _, row in df.iterrows():
-        question = row.get("question", "") or ""
-        ctx = row.get("context", "")
+        row_d = _to_json_safe(row.to_dict())
+        question_short = row_d.get("question", "") or ""
+        row_d["question_short"] = question_short
+        ctx = row_d.get("context", "")
         if isinstance(ctx, list):
             parts = []
             for item in ctx:
@@ -81,9 +71,8 @@ def process_hotpotqa(data_dir: str, limit: int | None) -> List[Dict[str, Any]]:
             ctx_str = "\n\n".join(parts)
         else:
             ctx_str = str(ctx) if ctx else ""
-        q_text = f"Context:\n{ctx_str}\n\nQuestion:\n{question}" if ctx_str else question
-        gold = str(row.get("answer", "") or "").strip()
-        out.append({"question": q_text, "gold_answer": gold})
+        row_d["question"] = f"Context:\n{ctx_str}\n\nQuestion:\n{question_short}" if ctx_str else question_short
+        out.append(row_d)
         if limit and len(out) >= limit:
             break
     return out
@@ -97,10 +86,9 @@ def process_math(data_dir: str, limit: int | None) -> List[Dict[str, Any]]:
     df = pd.read_parquet(path)
     out = []
     for _, row in df.iterrows():
-        problem = row.get("problem", "") or ""
-        solution = row.get("solution", "") or ""
-        gold = _extract_math_answer(solution)
-        out.append({"question": problem, "gold_answer": gold})
+        row_d = _to_json_safe(row.to_dict())
+        row_d["question"] = row_d.get("problem", "") or ""
+        out.append(row_d)
         if limit and len(out) >= limit:
             break
     return out
@@ -114,10 +102,9 @@ def process_gsm8k(data_dir: str, limit: int | None) -> List[Dict[str, Any]]:
     df = pd.read_parquet(path)
     out = []
     for _, row in df.iterrows():
-        question = str(row.get("question", "") or "").strip()
-        answer = row.get("answer", "") or ""
-        gold = _extract_gsm8k_answer(str(answer))
-        out.append({"question": question, "gold_answer": gold})
+        row_d = _to_json_safe(row.to_dict())
+        row_d["question"] = str(row_d.get("question", "") or "").strip()
+        out.append(row_d)
         if limit and len(out) >= limit:
             break
     return out

@@ -198,11 +198,10 @@ def run_data_test(
                 idle_time = (float(start_time) - float(arrive_time)) if (arrive_time is not None and start_time is not None) else None
                 latency = (float(done_time) - float(arrive_time)) if (arrive_time is not None and done_time is not None) else None
                 q_full = item.get("question", "")
-                # 题目信息放最前，question 只保留前 100 字符
+                # 题目信息放最前，question 只保留前 100 字符，透传数据集全部字段
                 out_item: Dict[str, Any] = {
                     "question": q_full[:100] if isinstance(q_full, str) else str(q_full)[:100],
                     "yaml": item.get("yaml", ""),
-                    "gold_answer": item.get("gold_answer", ""),
                 }
                 for k, v in item.items():
                     if k not in out_item:
