@@ -231,9 +231,9 @@ def main() -> None:
     import argparse
     p = argparse.ArgumentParser(description="MFE 多请求 Client")
     p.add_argument("--dataset", required=True, choices=DATASET_NAMES, help="数据集：drop, gsm8k, hotpotqa, math")
-    p.add_argument("-n", "--num", type=int, default=None, help="使用前 n 个问题测试，不指定则用全部。保存为 {dataset}_result_{n}.json 或 {dataset}_result.json")
+    p.add_argument("-n", "--num", type=int, default=None, help="使用前 n 个问题测试，不指定则用全部。保存为 {dataset}_{yaml}_result_{n}.json")
     p.add_argument("--templates-dir", default="templates", help="工作流 YAML 目录")
-    p.add_argument("--yaml", default="adv_reason_3.yaml", help="YAML 模板")
+    p.add_argument("--yaml", default="adv_reason_3.yaml", help="YAML 模板，如 adv_reason_4m.yaml。可指定不同 yaml 跑同一数据集，结果文件名会带上 yaml 名")
     p.add_argument("--send-interval", type=float, default=0.0, help="发送间隔（秒）")
     p.add_argument("--worker-delay", type=float, default=None, help="TestWorker 模拟延迟（秒）")
     p.add_argument("--test-worker", action="store_true", help="使用 TestWorker")
@@ -271,7 +271,11 @@ def main() -> None:
         _zero_timestamps(results)
         out_dir = os.path.join(root, "data", args.dataset)
         os.makedirs(out_dir, exist_ok=True)
-        out_name = f"{args.dataset}_result_{args.num}.json" if args.num is not None else f"{args.dataset}_result.json"
+        yaml_base = args.yaml.replace(".yaml", "") if args.yaml else "default"
+        if args.num is not None:
+            out_name = f"{args.dataset}_{yaml_base}_result_{args.num}.json"
+        else:
+            out_name = f"{args.dataset}_{yaml_base}_result.json"
         out_path = os.path.join(out_dir, out_name)
         with open(out_path, "w", encoding="utf-8") as f:
             json.dump(results, f, ensure_ascii=False, indent=2)
