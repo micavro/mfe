@@ -42,12 +42,15 @@ def load_questions_from_parquet(
 
 
 def _zero_timestamps(results: List[Dict[str, Any]]) -> None:
-    """将所有 benchmark、arrive_time、done_time 减去最小值，使时间从 0 开始。"""
+    """将所有 benchmark、arrive_time、start_time、done_time 减去最小值，使时间从 0 开始。"""
     all_ts: List[float] = []
     for r in results:
         at = r.get("arrive_time")
         if at is not None:
             all_ts.append(float(at))
+        st = r.get("start_time")
+        if st is not None:
+            all_ts.append(float(st))
         dt = r.get("done_time")
         if dt is not None:
             all_ts.append(float(dt))
@@ -60,6 +63,8 @@ def _zero_timestamps(results: List[Dict[str, Any]]) -> None:
     for r in results:
         if r.get("arrive_time") is not None:
             r["arrive_time"] = float(r["arrive_time"]) - min_ts
+        if r.get("start_time") is not None:
+            r["start_time"] = float(r["start_time"]) - min_ts
         if r.get("done_time") is not None:
             r["done_time"] = float(r["done_time"]) - min_ts
         bench = r.get("benchmark") or {}
@@ -188,10 +193,14 @@ def run_data_test(
                 mfe_answer = _extract_final_answer(st)
                 arrive_time = st.get("arrive_time")
                 done_time = st.get("done_time")
+                bench = st.get("benchmark") or {}
+                start_time = min(float(v[0]) for v in bench.values()) if bench else None
+                idle_time = (float(start_time) - float(arrive_time)) if (arrive_time is not None and start_time is not None) else None
                 latency = (float(done_time) - float(arrive_time)) if (arrive_time is not None and done_time is not None) else None
-                # 题目信息放最前，运行答案命名为 mfe_answer
+                q_full = item.get("question", "")
+                # 题目信息放最前，question 只保留前 100 字符
                 out_item: Dict[str, Any] = {
-                    "question": item.get("question", ""),
+                    "question": q_full[:100] if isinstance(q_full, str) else str(q_full)[:100],
                     "yaml": item.get("yaml", ""),
                     "gold_answer": item.get("gold_answer", ""),
                 }
@@ -199,9 +208,11 @@ def run_data_test(
                     if k not in out_item:
                         out_item[k] = v
                 out_item["mfe_answer"] = mfe_answer
-                out_item["benchmark"] = st.get("benchmark", {})
+                out_item["benchmark"] = bench
                 out_item["total_answer_time"] = st.get("total_answer_time")
                 out_item["arrive_time"] = arrive_time
+                out_item["start_time"] = start_time
+                out_item["idle_time"] = idle_time
                 out_item["done_time"] = done_time
                 out_item["latency"] = latency
                 out_item["uid"] = uid
