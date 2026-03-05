@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""多请求 Client：submit/status/send_test，通过 Queue 与 Server 通信。支持 JSON 输入/输出做数据测试。"""
+"""多请求 Client：submit/status，从 parquet 数据集读取并测试。"""
 
 from __future__ import annotations
 
@@ -19,6 +19,51 @@ sys.path.insert(0, os.path.dirname(_root) if os.path.isfile(os.path.join(_root, 
 
 from mfe.serve import run_server
 from mfe.config import is_verbose, set_verbose
+from mfe.scripts.process_datasets import PROCESSORS
+
+DATASET_NAMES = ("drop", "gsm8k", "hotpotqa", "math")
+
+
+def load_questions_from_parquet(
+    dataset_name: str,
+    data_dir: str,
+    yaml_name: str = "adv_reason_3.yaml",
+    n: Optional[int] = None,
+) -> List[Dict[str, Any]]:
+    """从 mfe/data/{dataset}/{dataset}.parquet 读取前 n 个问题。"""
+    if dataset_name not in PROCESSORS:
+        raise ValueError(f"Unknown dataset: {dataset_name}. Choose from {list(PROCESSORS.keys())}")
+    rows = PROCESSORS[dataset_name](data_dir, n)
+    if not yaml_name.endswith(".yaml"):
+        yaml_name = f"{yaml_name}.yaml"
+    for r in rows:
+        r["yaml"] = yaml_name
+    return rows
+
+
+def _zero_timestamps(results: List[Dict[str, Any]]) -> None:
+    """将所有 benchmark、arrive_time、done_time 减去最小值，使时间从 0 开始。"""
+    all_ts: List[float] = []
+    for r in results:
+        at = r.get("arrive_time")
+        if at is not None:
+            all_ts.append(float(at))
+        dt = r.get("done_time")
+        if dt is not None:
+            all_ts.append(float(dt))
+        for vals in (r.get("benchmark") or {}).values():
+            if isinstance(vals, (list, tuple)) and len(vals) >= 2:
+                all_ts.extend([float(vals[0]), float(vals[1])])
+    if not all_ts:
+        return
+    min_ts = min(all_ts)
+    for r in results:
+        if r.get("arrive_time") is not None:
+            r["arrive_time"] = float(r["arrive_time"]) - min_ts
+        if r.get("done_time") is not None:
+            r["done_time"] = float(r["done_time"]) - min_ts
+        bench = r.get("benchmark") or {}
+        r["benchmark"] = {k: [float(v[0]) - min_ts, float(v[1]) - min_ts] for k, v in bench.items()}
 
 
 class Client:
@@ -81,21 +126,6 @@ class Client:
         self._req_q.put({"command": "exit"})
 
 
-def send_test(client: Client, templates_dir: str, num_requests: int = 5, send_interval: float = 0.5, templates: Optional[List[str]] = None) -> List[str]:
-    if templates is None or len(templates) == 0:
-        templates = ["adv_reason_3.yaml"]
-    tpls = [t if t.endswith(".yaml") else f"{t}.yaml" for t in templates]
-    uids: List[str] = []
-    for i in range(num_requests):
-        if i > 0:
-            time.sleep(send_interval)
-        tpl = tpls[i % len(tpls)]
-        prompt = f"Question {i+1}"
-        uid = client.submit(tpl, prompt)
-        uids.append(uid)
-    return uids
-
-
 def _strip_chat_template(raw: str) -> str:
     """从 Llama chat template 原始输出中提取最后一个 assistant 回复。"""
     if not raw:
@@ -156,17 +186,21 @@ def run_data_test(
             if st and st.get("status") == "completed":
                 item = questions[i]
                 answer = _extract_final_answer(st)
+                arrive_time = st.get("arrive_time")
+                done_time = st.get("done_time")
+                latency = (float(done_time) - float(arrive_time)) if (arrive_time is not None and done_time is not None) else None
                 out_item: Dict[str, Any] = {
                     "question": item.get("question", ""),
                     "yaml": item.get("yaml", ""),
                     "answer": answer,
-                    "op_output": st.get("op_output", {}),
+                    "gold_answer": item.get("gold_answer", ""),
                     "benchmark": st.get("benchmark", {}),
                     "total_answer_time": st.get("total_answer_time"),
+                    "arrive_time": arrive_time,
+                    "done_time": done_time,
+                    "latency": latency,
                     "uid": uid,
                 }
-                if "gold_answer" in item:
-                    out_item["gold_answer"] = item["gold_answer"]
                 completed[uid] = out_item
                 if is_verbose() and st.get("total_answer_time") is not None:
                     print(f"  [{i+1}/{len(uids)}] uid={uid[:8]}... completed in {st['total_answer_time']:.2f}s", flush=True)
@@ -182,20 +216,19 @@ def run_data_test(
 def main() -> None:
     import argparse
     p = argparse.ArgumentParser(description="MFE 多请求 Client")
+    p.add_argument("--dataset", required=True, choices=DATASET_NAMES, help="数据集：drop, gsm8k, hotpotqa, math")
+    p.add_argument("-n", "--num", type=int, default=None, help="使用前 n 个问题测试，不指定则用全部。保存为 {dataset}_result_{n}.json 或 {dataset}_result.json")
     p.add_argument("--templates-dir", default="templates", help="工作流 YAML 目录")
-    p.add_argument("--input-json", default=None, help="输入 JSON 文件，每项含 question、yaml")
-    p.add_argument("--output-json", default=None, help="输出 JSON 文件，保存答案等")
-    p.add_argument("--templates", nargs="+", default=None, help="轮换使用的 YAML 列表（默认测试用）")
-    p.add_argument("-n", "--num", type=int, default=5, help="请求数（默认测试用）")
-    p.add_argument("--send-interval", type=float, default=0.5, help="发送间隔（秒）")
-    p.add_argument("--worker-delay", type=float, default=None, help="TestWorker 模拟延迟（秒），如 2")
+    p.add_argument("--yaml", default="adv_reason_3.yaml", help="YAML 模板")
+    p.add_argument("--send-interval", type=float, default=0.0, help="发送间隔（秒）")
+    p.add_argument("--worker-delay", type=float, default=None, help="TestWorker 模拟延迟（秒）")
     p.add_argument("--test-worker", action="store_true", help="使用 TestWorker")
     p.add_argument("-v", "--verbose", action="store_true")
     args = p.parse_args()
 
     if args.verbose:
         set_verbose(True)
-        os.environ["MFE_VERBOSE"] = "1"  # 子进程 server/worker 继承
+        os.environ["MFE_VERBOSE"] = "1"
     if args.worker_delay is not None:
         os.environ["MFE_TEST_WORKER_DELAY"] = str(args.worker_delay)
 
@@ -214,39 +247,21 @@ def main() -> None:
 
     client = Client(req_q, resp_q)
     try:
-        if args.input_json and args.output_json:
-            with open(args.input_json, "r", encoding="utf-8") as f:
-                questions = json.load(f)
-            if not isinstance(questions, list):
-                questions = [questions]
-            print(f"Loaded {len(questions)} questions from {args.input_json}")
-            results = run_data_test(client, questions, send_interval=args.send_interval)
-            out_path = os.path.abspath(args.output_json)
-            os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
-            with open(out_path, "w", encoding="utf-8") as f:
-                json.dump(results, f, ensure_ascii=False, indent=2)
-            print(f"Saved {len(results)} results to {out_path}")
-        else:
-            templates_list = args.templates or ["adv_reason_3.yaml", "adv_reason_4m.yaml", "multi_step_retrival.yaml"]
-            uids = send_test(
-                client, templates_abs,
-                num_requests=args.num,
-                send_interval=args.send_interval,
-                templates=templates_list,
-            )
-            completed = set()
-            while len(completed) < len(uids):
-                for uid in uids:
-                    if uid in completed:
-                        continue
-                    st = client.status(uid)
-                    if st and st.get("status") == "completed":
-                        completed.add(uid)
-                        t = st.get("total_answer_time")
-                        if t is not None:
-                            print(f"  uid={uid[:8]}... completed in {t:.2f}s")
-                time.sleep(0.5)
-            print(f"Done. {len(completed)}/{len(uids)} completed.")
+        data_dir = os.path.join(root, "data")
+        questions = load_questions_from_parquet(args.dataset, data_dir, args.yaml, args.num)
+        if not questions:
+            print(f"No data for dataset {args.dataset}")
+            return
+        print(f"Loaded {len(questions)} questions from mfe/data/{args.dataset}/{args.dataset}.parquet")
+        results = run_data_test(client, questions, send_interval=args.send_interval)
+        _zero_timestamps(results)
+        out_dir = os.path.join(root, "data", args.dataset)
+        os.makedirs(out_dir, exist_ok=True)
+        out_name = f"{args.dataset}_result_{args.num}.json" if args.num is not None else f"{args.dataset}_result.json"
+        out_path = os.path.join(out_dir, out_name)
+        with open(out_path, "w", encoding="utf-8") as f:
+            json.dump(results, f, ensure_ascii=False, indent=2)
+        print(f"Saved {len(results)} results to {out_path}")
     finally:
         client.close()
         proc.join(timeout=5.0)

@@ -119,7 +119,7 @@ class MultiRequestOptimizer:
         try:
             ops, _, end_ops = self._get_dag(q.template)
         except Exception:
-            return {"uid": uid, "status": "error", "op_output": {}, "benchmark": {}, "total_answer_time": None}
+            return {"uid": uid, "status": "error", "op_output": {}, "benchmark": {}, "total_answer_time": None, "arrive_time": None, "done_time": None}
         end_ids = {e.id for e in end_ops}
         done = set(q.op_output.keys())
         if end_ids and end_ids <= done:
@@ -128,14 +128,15 @@ class MultiRequestOptimizer:
             st = "running"
         else:
             st = "pending"
+        done_time = max(t[1] for t in q.benchmark.values()) if q.benchmark else None
         return {
             "uid": uid,
             "status": st,
             "op_output": dict(q.op_output),
             "benchmark": {k: [float(t[0]), float(t[1])] for k, t in q.benchmark.items()},
-            "total_answer_time": (
-                max(t[1] for t in q.benchmark.values()) - q.create_time if q.benchmark else None
-            ),
+            "total_answer_time": (done_time - q.create_time if done_time is not None else None),
+            "arrive_time": q.create_time,
+            "done_time": done_time,
         }
 
     def _get_ready_tasks(self) -> List[Tuple[str, Operator]]:
