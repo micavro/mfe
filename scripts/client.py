@@ -185,22 +185,26 @@ def run_data_test(
             st = client.status(uid)
             if st and st.get("status") == "completed":
                 item = questions[i]
-                answer = _extract_final_answer(st)
+                mfe_answer = _extract_final_answer(st)
                 arrive_time = st.get("arrive_time")
                 done_time = st.get("done_time")
                 latency = (float(done_time) - float(arrive_time)) if (arrive_time is not None and done_time is not None) else None
+                # 题目信息放最前，运行答案命名为 mfe_answer
                 out_item: Dict[str, Any] = {
                     "question": item.get("question", ""),
                     "yaml": item.get("yaml", ""),
-                    "answer": answer,
                     "gold_answer": item.get("gold_answer", ""),
-                    "benchmark": st.get("benchmark", {}),
-                    "total_answer_time": st.get("total_answer_time"),
-                    "arrive_time": arrive_time,
-                    "done_time": done_time,
-                    "latency": latency,
-                    "uid": uid,
                 }
+                for k, v in item.items():
+                    if k not in out_item:
+                        out_item[k] = v
+                out_item["mfe_answer"] = mfe_answer
+                out_item["benchmark"] = st.get("benchmark", {})
+                out_item["total_answer_time"] = st.get("total_answer_time")
+                out_item["arrive_time"] = arrive_time
+                out_item["done_time"] = done_time
+                out_item["latency"] = latency
+                out_item["uid"] = uid
                 completed[uid] = out_item
                 if is_verbose() and st.get("total_answer_time") is not None:
                     print(f"  [{i+1}/{len(uids)}] uid={uid[:8]}... completed in {st['total_answer_time']:.2f}s", flush=True)

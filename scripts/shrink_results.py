@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""将 results JSON 精简为只保留 answer 和 gold_answer。
+"""将 results JSON 精简为只保留 mfe_answer 和 gold_answer。
 先读取 JSON，处理非法 UTF-8 字符（直接忽略），写入临时文件，再从该文件解析并精简。"""
 
 from __future__ import annotations
@@ -12,7 +12,7 @@ import os
 
 
 def main() -> None:
-    p = argparse.ArgumentParser(description="精简 results JSON，只保留 answer 和 gold_answer")
+    p = argparse.ArgumentParser(description="精简 results JSON，只保留 mfe_answer 和 gold_answer")
     p.add_argument("input", help="输入 JSON 路径，如 data/results_hotpotqa.json")
     p.add_argument("-o", "--output", default=None, help="输出路径，默认 inp_compact.json")
     p.add_argument("--keep-fixed", action="store_true", help="保留 UTF-8 修复后的中间文件")
@@ -84,7 +84,7 @@ def main() -> None:
             with open(fixed_path, "rb") as f:
                 for item in tqdm(ijson.items(f, "item"), desc="Parse", unit=" items"):
                     compact.append({
-                        "answer": str(item.get("answer", "")),
+                        "mfe_answer": str(item.get("mfe_answer", item.get("answer", ""))),
                         "gold_answer": str(item.get("gold_answer", "")),
                     })
         except Exception as e:
@@ -109,7 +109,7 @@ def main() -> None:
             data = [data]
         for item in tqdm(data, desc="Shrink", unit=" items"):
             compact.append({
-                "answer": str(item.get("answer", "")),
+                "mfe_answer": str(item.get("mfe_answer", item.get("answer", ""))),
                 "gold_answer": str(item.get("gold_answer", "")),
             })
 
