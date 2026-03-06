@@ -41,6 +41,28 @@ def load_questions_from_parquet(
     return rows
 
 
+def _to_json_safe(obj: Any) -> Any:
+    """将 numpy 等类型转为 JSON 可序列化格式，避免 json.dump 报错。"""
+    if hasattr(obj, "tolist"):
+        return obj.tolist()
+    if hasattr(obj, "item"):
+        return obj.item()
+    if isinstance(obj, dict):
+        return {k: _to_json_safe(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_to_json_safe(x) for x in obj]
+    return obj
+
+
+def _json_default(obj: Any) -> Any:
+    """处理 numpy 等不可 JSON 序列化的类型。"""
+    if hasattr(obj, "tolist"):
+        return obj.tolist()
+    if hasattr(obj, "item"):
+        return obj.item()
+    raise TypeError(f"Object of type {type(obj).__name__} is not JSON serializable")
+
+
 def _zero_timestamps(results: List[Dict[str, Any]]) -> None:
     """将所有 benchmark、arrive_time、start_time、done_time 减去最小值，使时间从 0 开始。"""
     all_ts: List[float] = []
@@ -269,6 +291,7 @@ def main() -> None:
         print(f"Loaded {len(questions)} questions from mfe/data/{args.dataset}/{args.dataset}.parquet")
         results = run_data_test(client, questions, send_interval=args.send_interval)
         _zero_timestamps(results)
+        results = _to_json_safe(results)  # 转换 numpy 等类型，避免 json.dump 报错
         out_dir = os.path.join(root, "data", args.dataset)
         os.makedirs(out_dir, exist_ok=True)
         yaml_base = args.yaml.replace(".yaml", "") if args.yaml else "default"
@@ -278,7 +301,7 @@ def main() -> None:
             out_name = f"{args.dataset}_{yaml_base}_result.json"
         out_path = os.path.join(out_dir, out_name)
         with open(out_path, "w", encoding="utf-8") as f:
-            json.dump(results, f, ensure_ascii=False, indent=2)
+            json.dump(results, f, ensure_ascii=False, indent=2, default=_json_default)
         print(f"Saved {len(results)} results to {out_path}")
     finally:
         client.close()
