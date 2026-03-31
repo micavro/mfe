@@ -8,9 +8,14 @@ import argparse
 import json
 import multiprocessing as mp
 import os
+import sys
 import time
 from statistics import mean
 from typing import Any, Dict, List, Optional
+
+_script_dir = os.path.dirname(os.path.abspath(__file__))
+_root = os.path.dirname(_script_dir)
+sys.path.insert(0, os.path.dirname(_root) if os.path.isfile(os.path.join(_root, "__init__.py")) else _root)
 
 from mfe.config import set_verbose
 from mfe.serve import run_server
