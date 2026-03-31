@@ -14,6 +14,18 @@ import torch
 from mfe.components import Query, Operator, ModelConfig, ExecuteInfo
 from mfe.config import is_verbose
 
+# 默认压低第三方库日志，避免 vLLM/Transformers 大量刷屏。
+# 可通过 MFE_VLLM_LOG_LEVEL 覆盖（DEBUG/INFO/WARNING/ERROR）。
+_mfe_vllm_level = os.environ.get("MFE_VLLM_LOG_LEVEL", "ERROR").upper()
+os.environ.setdefault("VLLM_LOGGING_LEVEL", _mfe_vllm_level)
+os.environ.setdefault("TRANSFORMERS_VERBOSITY", "error")
+os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
+_level_value = getattr(logging, _mfe_vllm_level, logging.ERROR)
+logging.getLogger("vllm").setLevel(_level_value)
+logging.getLogger("vllm.engine").setLevel(_level_value)
+logging.getLogger("vllm.worker").setLevel(_level_value)
+logging.getLogger("transformers").setLevel(logging.ERROR)
+
 
 class vLLMWorker:
     def __init__(self, id: int, physical_gpu_id: int, cmd_queue: "Any", result_queue: "Any") -> None:
