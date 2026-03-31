@@ -134,6 +134,7 @@ class MultiRequestOptimizer:
             "status": st,
             "op_output": dict(q.op_output),
             "benchmark": {k: [float(t[0]), float(t[1])] for k, t in q.benchmark.items()},
+            "worker_assignments": dict(q.worker_assignments),
             "total_answer_time": (done_time - q.create_time if done_time is not None else None),
             "arrive_time": q.create_time,
             "done_time": done_time,
@@ -205,6 +206,10 @@ class MultiRequestOptimizer:
                 self.cmd_queues[i].put(("execute", (exe,)))
                 self._inflight[i] = (uid, op)
                 self._inflight_tasks.add((uid, op.id))
+                with self._lock:
+                    q = self.requests.get(uid)
+                    if q:
+                        q.worker_assignments[op.id] = i
                 if is_verbose():
                     print(f"[OPT] -> Worker {i} op={op.id} query_ids=[{uid}] t={time.perf_counter():.1f}", flush=True)
 

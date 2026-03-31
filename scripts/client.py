@@ -64,9 +64,12 @@ def _json_default(obj: Any) -> Any:
 
 
 def _zero_timestamps(results: List[Dict[str, Any]]) -> None:
-    """将所有 benchmark、arrive_time、start_time、done_time 减去最小值，使时间从 0 开始。"""
+    """将所有 benchmark、submit/arrive/start/done_time 减去最小值，使时间从 0 开始。"""
     all_ts: List[float] = []
     for r in results:
+        sbt = r.get("submit_time")
+        if sbt is not None:
+            all_ts.append(float(sbt))
         at = r.get("arrive_time")
         if at is not None:
             all_ts.append(float(at))
@@ -83,6 +86,8 @@ def _zero_timestamps(results: List[Dict[str, Any]]) -> None:
         return
     min_ts = min(all_ts)
     for r in results:
+        if r.get("submit_time") is not None:
+            r["submit_time"] = float(r["submit_time"]) - min_ts
         if r.get("arrive_time") is not None:
             r["arrive_time"] = float(r["arrive_time"]) - min_ts
         if r.get("start_time") is not None:
@@ -193,6 +198,7 @@ def run_data_test(
 ) -> List[Dict[str, Any]]:
     """发送所有问题、等待完成、返回结果列表。questions 每项需有 question、yaml。"""
     uids: List[str] = []
+    submit_times: Dict[str, float] = {}
     for i, item in enumerate(questions):
         if i > 0 and send_interval > 0:
             time.sleep(send_interval)
@@ -200,8 +206,10 @@ def run_data_test(
         yaml_name = item.get("yaml", "adv_reason_3.yaml")
         if not yaml_name.endswith(".yaml"):
             yaml_name = f"{yaml_name}.yaml"
+        submit_time = time.perf_counter()
         uid = client.submit(yaml_name, q)
         uids.append(uid)
+        submit_times[uid] = submit_time
 
     completed: Dict[str, Dict[str, Any]] = {}
     last_progress = 0.0
@@ -219,10 +227,24 @@ def run_data_test(
                 start_time = min(float(v[0]) for v in bench.values()) if bench else None
                 idle_time = (float(start_time) - float(arrive_time)) if (arrive_time is not None and start_time is not None) else None
                 latency = (float(done_time) - float(arrive_time)) if (arrive_time is not None and done_time is not None) else None
+                op_durations = {
+                    op_name: (float(v[1]) - float(v[0]))
+                    for op_name, v in bench.items()
+                    if isinstance(v, (list, tuple)) and len(v) >= 2
+                }
+                run_time = sum(op_durations.values())
+                end_op_name = max(bench.keys(), key=lambda k: bench[k][1]) if bench else None
+                service_time = (
+                    (float(done_time) - float(start_time))
+                    if (done_time is not None and start_time is not None)
+                    else None
+                )
+                worker_assignments = st.get("worker_assignments") or {}
                 q_full = item.get("question", "")
-                # 题目信息放最前，question 只保留前 100 字符，透传数据集全部字段
+                # 题目信息放最前：保留 preview 便于浏览，同时保留完整 question 便于追溯
                 out_item: Dict[str, Any] = {
-                    "question": q_full[:100] if isinstance(q_full, str) else str(q_full)[:100],
+                    "question_preview": q_full[:100] if isinstance(q_full, str) else str(q_full)[:100],
+                    "question": q_full,
                     "yaml": item.get("yaml", ""),
                 }
                 for k, v in item.items():
@@ -230,9 +252,15 @@ def run_data_test(
                         out_item[k] = v
                 out_item["mfe_answer"] = mfe_answer
                 out_item["benchmark"] = bench
+                out_item["op_durations"] = op_durations
+                out_item["run_time"] = run_time
+                out_item["end_op_name"] = end_op_name
+                out_item["worker_assignments"] = worker_assignments
+                out_item["submit_time"] = submit_times.get(uid)
                 out_item["total_answer_time"] = st.get("total_answer_time")
                 out_item["arrive_time"] = arrive_time
                 out_item["start_time"] = start_time
+                out_item["service_time"] = service_time
                 out_item["idle_time"] = idle_time
                 out_item["done_time"] = done_time
                 out_item["latency"] = latency

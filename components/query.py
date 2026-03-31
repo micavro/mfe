@@ -16,3 +16,4 @@ class Query:
         self.step = 0
         self.create_time = time.perf_counter()
         self.benchmark = {}
+        self.worker_assignments = {}
